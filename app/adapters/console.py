@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 from app.adapters.base import PlatformAdapter
+from app.adapters.admin_commands import AdminCommandHandler
 from app.core.dispatcher import ContinuousMessageMerger, DispatchResult, MessageDispatcher
+from app.models.base import ModelError
+
+
+logger = logging.getLogger(__name__)
 
 
 MESSAGE_PATTERN = re.compile(r"^\s*\[([^\[\]]+)\]\s*(.+?)\s*$")
@@ -34,15 +40,18 @@ class ConsoleAdapter(PlatformAdapter):
         self,
         dispatcher: MessageDispatcher,
         merger: ContinuousMessageMerger,
+        admin_commands: AdminCommandHandler | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._merger = merger
+        self._admin_commands = admin_commands
         self._message_tasks: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         print("命令行聊天模拟器已启动。")
         print("消息格式：[张三] 消息内容")
         print("人工接管：/takeover 张三 on；恢复自动回复：/takeover 张三 off")
+        print("记忆管理：/memory help；联系人画像：/profile show 张三")
         print("退出：/quit")
         while True:
             try:
@@ -54,6 +63,10 @@ class ConsoleAdapter(PlatformAdapter):
                 break
             if not line.strip():
                 continue
+
+            if self._admin_commands is not None:
+                if await self._admin_commands.handle(line):
+                    continue
 
             takeover = parse_takeover_command(line)
             if takeover:
@@ -80,12 +93,17 @@ class ConsoleAdapter(PlatformAdapter):
         await self._merger.flush_all()
         if self._message_tasks:
             await asyncio.gather(*tuple(self._message_tasks))
+        await self._dispatcher.finish_background_tasks()
 
     async def _submit_and_print(self, contact: str, content: str) -> None:
         try:
             result = await self._merger.submit(contact, content)
+        except ModelError as exc:
+            print(f"[模型错误] {exc}")
+            return
         except Exception as exc:
-            print(f"[系统] 处理 {contact} 的消息失败：{exc}")
+            logger.exception("unexpected_message_error contact=%s", contact)
+            print(f"[系统] 处理 {contact} 的消息失败，请查看日志。")
             return
         if result is not None:
             self._print_result(result)
@@ -93,7 +111,11 @@ class ConsoleAdapter(PlatformAdapter):
     @staticmethod
     def _print_result(result: DispatchResult) -> None:
         if result.reply is None:
-            print(f"[系统] {result.session_id} 当前由人工接管，已记录消息但不自动回复")
+            if result.skip_reason == "human_takeover":
+                print(
+                    f"[系统] {result.session_id} 的消息在人工接管期间收到，"
+                    "已记录消息但不自动回复"
+                )
             return
         suffix = f"（合并 {result.message_count} 条消息）" if result.message_count > 1 else ""
         print(f"[{result.session_id}] 机器人{suffix}: {result.reply}")

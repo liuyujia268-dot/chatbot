@@ -1,0 +1,486 @@
+[
+  {
+    "id": "casual_weekend",
+    "title": "普通闲聊",
+    "category": "普通闲聊",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "今天终于周五了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["自然接话", "保持简短"],
+    "avoid": ["展开一套周末规划", "客服式追问"]
+  },
+  {
+    "id": "rant_ide_crash",
+    "title": "IDE 崩溃吐槽",
+    "category": "吐槽",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "我写半天"},
+          {"role": "user", "content": "IDE崩了"},
+          {"role": "user", "content": "没保存"}
+        ]
+      }
+    ],
+    "expected_behavior": ["理解是在吐槽", "先接情绪或简短回应"],
+    "avoid": ["立即输出完整的数据恢复教程", "复述全部经过"]
+  },
+  {
+    "id": "burst_changes_outcome",
+    "title": "连续消息后改口",
+    "category": "连续发送多条消息",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "我刚才试了"},
+          {"role": "user", "content": "还是不行"},
+          {"role": "user", "content": "等等"},
+          {"role": "user", "content": "好像可以了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["按顺序理解", "回应最终变成可以了"],
+    "avoid": ["仍按失败状态给排障步骤", "逐条机械回复"]
+  },
+  {
+    "id": "sudden_change_mind",
+    "title": "突然改主意",
+    "category": "对方突然改口",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "晚上去吃火锅吧"},
+          {"role": "user", "content": "算了，外面雨太大了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["以最新决定为准", "自然接住改口"],
+    "avoid": ["继续确认火锅店", "忽略下雨信息"]
+  },
+  {
+    "id": "correct_understanding",
+    "title": "纠正理解",
+    "category": "对方纠正理解",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "小陈今天没来"},
+          {"role": "assistant", "content": "他请假了？"},
+          {"role": "user", "content": "不是，他去客户那边了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["接受纠正", "不固守之前猜测"],
+    "avoid": ["继续说请假", "大段道歉说明"]
+  },
+  {
+    "id": "switch_topic",
+    "title": "突然切换话题",
+    "category": "突然切换话题",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "那个接口我晚点再看"},
+          {"role": "assistant", "content": "行"},
+          {"role": "user", "content": "你看今天的比赛了吗"}
+        ]
+      }
+    ],
+    "expected_behavior": ["跟随新话题", "不知道时不编造观看经历"],
+    "avoid": ["继续讲接口", "声称自己看过比赛"]
+  },
+  {
+    "id": "single_question_mark",
+    "title": "单独问号",
+    "category": "？",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "我可能要晚点到"},
+          {"role": "assistant", "content": "那我先点菜了"},
+          {"role": "user", "content": "？"}
+        ]
+      }
+    ],
+    "expected_behavior": ["意识到对方可能没理解或在质疑", "简短澄清"],
+    "avoid": ["解释问号的含义", "无上下文长篇回答"]
+  },
+  {
+    "id": "single_cao",
+    "title": "单独的草",
+    "category": "草",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "他把测试库当正式库删了"},
+          {"role": "assistant", "content": "这也能删错啊"},
+          {"role": "user", "content": "草"}
+        ]
+      }
+    ],
+    "expected_behavior": ["理解为口语情绪反应", "自然简短"],
+    "avoid": ["解释网络用语", "进行道德说教"]
+  },
+  {
+    "id": "laughter",
+    "title": "哈哈哈哈",
+    "category": "哈哈哈哈",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "然后他一本正经地走错会议室了"},
+          {"role": "assistant", "content": "还装得挺像那么回事"},
+          {"role": "user", "content": "哈哈哈哈"}
+        ]
+      }
+    ],
+    "expected_behavior": ["顺着笑点接话", "可以非常短"],
+    "avoid": ["分析为什么好笑", "强行转成建议"]
+  },
+  {
+    "id": "single_okay",
+    "title": "行",
+    "category": "行",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "assistant", "content": "文件我放共享目录了"},
+          {"role": "user", "content": "行"}
+        ]
+      }
+    ],
+    "expected_behavior": ["接受对方确认", "可以不继续展开"],
+    "avoid": ["再次说明文件位置", "连串追问"]
+  },
+  {
+    "id": "forget_it",
+    "title": "算了",
+    "category": "算了",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "本来想抢那张票"},
+          {"role": "user", "content": "算了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["尊重结束意图", "简短接话"],
+    "avoid": ["继续劝抢票", "自动列替代购票方案"]
+  },
+  {
+    "id": "quoted_previous",
+    "title": "引用前文",
+    "category": "引用前面的内容",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "方案一便宜，但是要多等两天"},
+          {"role": "assistant", "content": "时间不急的话倒也能省一点"},
+          {"role": "user", "content": "就你说的“省一点”那个，其实只差十块"}
+        ]
+      }
+    ],
+    "expected_behavior": ["正确理解引用对象", "结合十块这个新信息"],
+    "avoid": ["把省一点当成另一个方案", "复述所有方案"]
+  },
+  {
+    "id": "vague_that_one",
+    "title": "模糊指代那个",
+    "category": "模糊指代",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "蓝色那版图标太亮，灰色那版又有点闷"},
+          {"role": "assistant", "content": "确实都有点极端"},
+          {"role": "user", "content": "那个稍微调暗一点应该就行"}
+        ]
+      }
+    ],
+    "expected_behavior": ["结合近邻上下文理解更可能指蓝色版", "必要时才简短确认"],
+    "avoid": ["武断扩写不存在的细节", "完全忽略指代"]
+  },
+  {
+    "id": "statement_no_advice",
+    "title": "单纯陈述",
+    "category": "不需要建议",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "楼下那家咖啡店今天换了新杯子，还挺好看的"}
+        ]
+      }
+    ],
+    "expected_behavior": ["像日常聊天一样回应分享"],
+    "avoid": ["推荐咖啡店运营策略", "询问是否需要帮助"]
+  },
+  {
+    "id": "real_help_request",
+    "title": "明确请求帮助",
+    "category": "真正请求帮助",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "我明早要做五分钟汇报，内容太多了，你帮我想想怎么删到三点？"}
+        ]
+      }
+    ],
+    "expected_behavior": ["确认这是求助", "给出简洁且可执行的思路"],
+    "avoid": ["只共情不提供帮助", "写成过长教程"]
+  },
+  {
+    "id": "end_topic",
+    "title": "结束话题",
+    "category": "对方结束话题",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "assistant", "content": "那就先按这个版本交吧"},
+          {"role": "user", "content": "嗯，先这样，我去忙了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["自然收尾", "不强行延续"],
+    "avoid": ["再抛出新问题", "客服式告别"]
+  },
+  {
+    "id": "cold_reply",
+    "title": "冷淡回复",
+    "category": "冷淡回复",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "assistant", "content": "今天那家面还不错"},
+          {"role": "user", "content": "哦"}
+        ]
+      }
+    ],
+    "expected_behavior": ["匹配对方简短语气", "允许不延展"],
+    "avoid": ["连续追问", "热情过度"]
+  },
+  {
+    "id": "long_message",
+    "title": "较长的工作吐槽",
+    "category": "较长消息",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "今天开会从两点开到五点，前两个小时一直在讨论标题用蓝色还是绿色，最后十分钟才说真正的需求，而且下班前又通知明早要交，我现在完全不想打开电脑。"}
+        ]
+      }
+    ],
+    "expected_behavior": ["抓住荒谬和疲惫感", "回应长度适中"],
+    "avoid": ["逐句总结", "立刻给时间管理清单"]
+  },
+  {
+    "id": "two_contacts",
+    "title": "两个联系人同时聊天",
+    "category": "会话隔离",
+    "conversations": [
+      {
+        "session_id": "张三",
+        "messages": [
+          {"role": "user", "content": "我面试过了"},
+          {"role": "assistant", "content": "可以啊！"},
+          {"role": "user", "content": "下周入职"}
+        ]
+      },
+      {
+        "session_id": "李四",
+        "messages": [
+          {"role": "user", "content": "我今天感冒了"},
+          {"role": "assistant", "content": "难怪你刚才声音不太对"},
+          {"role": "user", "content": "准备早点睡"}
+        ]
+      }
+    ],
+    "expected_behavior": ["两个会话分别承接各自上下文"],
+    "avoid": ["把入职和感冒信息串到同一回复"]
+  },
+  {
+    "id": "during_generation_supplement",
+    "title": "生成期间收到补充",
+    "category": "回复过期",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "登录页好像有问题"},
+          {"role": "user", "content": "我补充一下，不是登录失败，是登录后头像没刷新"}
+        ]
+      }
+    ],
+    "expected_behavior": ["只基于最新补充后的问题回应", "旧生成应由单元测试验证丢弃"],
+    "avoid": ["继续排查登录失败", "忽略补充说明"]
+  },
+  {
+    "id": "unknown_personal_fact",
+    "title": "不知道的个人信息",
+    "category": "不编造",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "你记得小王上次点的是什么吗"}
+        ]
+      }
+    ],
+    "expected_behavior": ["承认上下文没有该信息", "简短回应"],
+    "avoid": ["猜一个菜名", "假装记得"]
+  },
+  {
+    "id": "playful_tease",
+    "title": "开玩笑",
+    "category": "玩笑",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "我决定了，从明天开始每天六点起床"},
+          {"role": "assistant", "content": "这个决定听着有点突然"},
+          {"role": "user", "content": "放心，闹钟响了我肯定先关掉"}
+        ]
+      }
+    ],
+    "expected_behavior": ["理解反转笑点", "轻松接话"],
+    "avoid": ["认真制定早起计划", "教育对方自律"]
+  },
+  {
+    "id": "bad_news",
+    "title": "分享坏消息",
+    "category": "情绪承接",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "等了一个月的活动临时取消了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["自然表达遗憾", "先接情绪"],
+    "avoid": ["自动提供替代活动清单", "空泛客服安慰"]
+  },
+  {
+    "id": "simple_update",
+    "title": "普通进度更新",
+    "category": "陈述",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "刚才那个表我改完了，已经发群里了"}
+        ]
+      }
+    ],
+    "expected_behavior": ["理解事情已经完成", "简短确认"],
+    "avoid": ["继续教怎么改表", "要求对方重复发送"]
+  },
+  {
+    "id": "ambiguous_reference",
+    "title": "无法确定的指代",
+    "category": "不确定时不编造",
+    "conversations": [
+      {
+        "session_id": "A",
+        "messages": [
+          {"role": "user", "content": "两个都发我吧"},
+          {"role": "assistant", "content": "你说的是哪两个？"},
+          {"role": "user", "content": "就刚才群里那两个"}
+        ]
+      }
+    ],
+    "expected_behavior": ["承认当前上下文无法看到群内容", "只做必要澄清"],
+    "avoid": ["虚构文件名称", "假装已经发送"]
+  },
+  {
+    "id": "memory_driving_followup",
+    "title": "隔了一段时间继续准备驾考",
+    "category": "长期记忆-进行中事件",
+    "conversations": [{
+      "session_id": "A",
+      "long_term_memories": [{
+        "memory_type": "ongoing_event",
+        "memory_key": "exam.driving",
+        "content": "A 下个月准备参加驾照考试"
+      }],
+      "messages": [{"role": "user", "content": "最近一直在刷题"}]
+    }],
+    "expected_behavior": ["有机会联系到驾照考试", "自然简短地接话"],
+    "avoid": ["假装不知道在刷什么题", "展开完整驾考教程"]
+  },
+  {
+    "id": "memory_cilantro_preference",
+    "title": "利用已确认的饮食偏好",
+    "category": "长期记忆-偏好",
+    "conversations": [{
+      "session_id": "A",
+      "long_term_memories": [{
+        "memory_type": "preference",
+        "memory_key": "food.cilantro",
+        "content": "A 不吃香菜"
+      }],
+      "messages": [{"role": "user", "content": "他们非要带我去吃一家全是香菜的店"}]
+    }],
+    "expected_behavior": ["理解这家店对对方很不友好", "顺着吐槽接话"],
+    "avoid": ["推荐香菜菜谱", "询问对方是否爱吃香菜"]
+  },
+  {
+    "id": "memory_location_superseded",
+    "title": "地点记忆更新后只使用新值",
+    "category": "长期记忆-冲突更新",
+    "conversations": [{
+      "session_id": "A",
+      "long_term_memories": [{
+        "memory_type": "fact",
+        "memory_key": "location.current",
+        "content": "A 已从上海搬到杭州，目前住在杭州"
+      }],
+      "messages": [{"role": "user", "content": "周末想在附近随便逛逛"}]
+    }],
+    "expected_behavior": ["如涉及地点则以杭州为准", "不强行扩展建议"],
+    "avoid": ["继续认为对方住在上海", "编造具体住址"]
+  },
+  {
+    "id": "memory_contact_isolation",
+    "title": "长期记忆按联系人隔离",
+    "category": "长期记忆-会话隔离",
+    "conversations": [
+      {
+        "session_id": "联系人A",
+        "long_term_memories": [{
+          "memory_type": "ongoing_event",
+          "memory_key": "exam.driving",
+          "content": "联系人A 正在准备驾照考试"
+        }],
+        "messages": [{"role": "user", "content": "最近一直在刷题"}]
+      },
+      {
+        "session_id": "联系人B",
+        "messages": [{"role": "user", "content": "最近干嘛呢"}]
+      }
+    ],
+    "expected_behavior": ["A 的回复可承接驾考", "B 的回复不包含 A 的私人信息"],
+    "avoid": ["向联系人B提到驾照考试", "把两人的上下文串联"]
+  }
+]

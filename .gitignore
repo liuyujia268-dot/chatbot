@@ -13,6 +13,8 @@ build/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/*.log
+data/chat_replay_results*.json
 .idea/
 .vscode/
-
+/gitee令牌.txt

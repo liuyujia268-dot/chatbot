@@ -17,3 +17,11 @@ def test_session_records_messages_in_order() -> None:
     session.add_message("assistant", "hi")
 
     assert [item.content for item in session.messages] == ["hello", "hi"]
+
+
+def test_session_history_is_bounded() -> None:
+    session = SessionManager(max_messages=3).get_or_create("user-1")
+    for index in range(5):
+        session.add_message("user", str(index))
+
+    assert [item.content for item in session.messages] == ["2", "3", "4"]
