@@ -1,0 +1,2 @@
+"""Messaging platform adapters."""
+
