@@ -5,10 +5,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import UTC, datetime
+from itertools import count
+from uuid import uuid4
 
 from app.adapters.base import PlatformAdapter
 from app.adapters.admin_commands import AdminCommandHandler
+from app.adapters.outbound import (
+    ConsoleMessageSender,
+    DryRunMessageSender,
+    MessageSender,
+)
 from app.core.dispatcher import ContinuousMessageMerger, DispatchResult, MessageDispatcher
+from app.core.platform import OutboundMessage, PlatformMessage
 from app.models.base import ModelError
 
 
@@ -41,17 +50,53 @@ class ConsoleAdapter(PlatformAdapter):
         dispatcher: MessageDispatcher,
         merger: ContinuousMessageMerger,
         admin_commands: AdminCommandHandler | None = None,
+        sender: MessageSender | None = None,
+        dry_run: bool = False,
+        qq_mode: bool = False,
+        qq_sender: MessageSender | None = None,
+        qq_dry_run: bool = True,
+        qq_primary_contact_id: str | None = None,
+        qq_primary_contact_name: str = "宇飞",
     ) -> None:
         self._dispatcher = dispatcher
         self._merger = merger
         self._admin_commands = admin_commands
+        concrete_sender = sender or ConsoleMessageSender()
+        self._sender = (
+            DryRunMessageSender(concrete_sender) if dry_run else concrete_sender
+        )
+        self._run_id = uuid4().hex
+        self._message_ids = count(1)
         self._message_tasks: set[asyncio.Task[None]] = set()
+        self._qq_mode = qq_mode
+        self._qq_sender = qq_sender
+        self._qq_dry_run = qq_dry_run
+        self._qq_primary_id = qq_primary_contact_id
+        self._qq_primary_name = qq_primary_contact_name
+        if qq_mode and qq_sender is None:
+            raise ValueError("QQ console mode requires a QQ sender")
 
     async def run(self) -> None:
-        print("命令行聊天模拟器已启动。")
-        print("消息格式：[张三] 消息内容")
-        print("人工接管：/takeover 张三 on；恢复自动回复：/takeover 张三 off")
+        if self._qq_mode:
+            print("QQ 接入与本地管理控制台已启动。")
+            print("手动私聊：[宇飞] 消息内容；或 [QQ号] 消息内容")
+            print("手动群聊：[群:群号] 消息内容")
+        else:
+            print("命令行聊天模拟器已启动。")
+            print("消息格式：[张三] 消息内容")
+        if self._qq_mode:
+            print(
+                f"人工接管：/takeover {self._qq_primary_name} on；恢复："
+                f"/takeover {self._qq_primary_name} off"
+                "（其他联系人使用 QQ号）"
+            )
+        else:
+            print(
+                "人工接管：/takeover 张三 on；"
+                "恢复自动回复：/takeover 张三 off"
+            )
         print("记忆管理：/memory help；联系人画像：/profile show 张三")
+        print("风格样本：/style help")
         print("退出：/quit")
         while True:
             try:
@@ -71,7 +116,19 @@ class ConsoleAdapter(PlatformAdapter):
             takeover = parse_takeover_command(line)
             if takeover:
                 contact, enabled = takeover
-                self._dispatcher.set_human_takeover(contact, enabled)
+                try:
+                    conversation_id = (
+                        self._qq_conversation_id(contact)
+                        if self._qq_mode
+                        else contact
+                    )
+                except ValueError as exc:
+                    print(f"[系统] {exc}")
+                    continue
+                self._dispatcher.set_human_takeover(
+                    conversation_id,
+                    enabled,
+                )
                 state = "开启" if enabled else "关闭"
                 print(f"[系统] {contact} 的人工接管已{state}")
                 continue
@@ -85,6 +142,10 @@ class ConsoleAdapter(PlatformAdapter):
                 print(f"[系统] {exc}")
                 continue
 
+            if self._qq_mode:
+                await self.send_qq_message(contact, content)
+                continue
+
             task = asyncio.create_task(self._submit_and_print(contact, content))
             self._message_tasks.add(task)
             task.add_done_callback(self._message_tasks.discard)
@@ -95,9 +156,76 @@ class ConsoleAdapter(PlatformAdapter):
             await asyncio.gather(*tuple(self._message_tasks))
         await self._dispatcher.finish_background_tasks()
 
+    async def send_qq_message(
+        self,
+        contact: str,
+        content: str,
+    ) -> OutboundMessage | None:
+        """Send operator-authored text directly to QQ through NapCat."""
+        try:
+            conversation_id = self._qq_conversation_id(contact)
+        except ValueError as exc:
+            print(f"[系统] {exc}")
+            return None
+        message = OutboundMessage(
+            platform="qq",
+            account_id="console-manual",
+            conversation_id=conversation_id,
+            text=content,
+            metadata={"source_type": "human_self"},
+        )
+        try:
+            assert self._qq_sender is not None
+            await self._qq_sender.send(message)
+        except Exception:
+            logger.exception(
+                "qq_manual_send_failed conversation=%s",
+                conversation_id,
+            )
+            print("[QQ 手动发送失败] 请确认 NapCat WebSocket 已连接并查看日志")
+            return None
+        mode = "DRY RUN" if self._qq_dry_run else "SENT"
+        print(f"[QQ MANUAL {mode}] {contact}: {content}")
+        return message
+
+    def _qq_conversation_id(self, contact: str) -> str:
+        value = contact.strip()
+        if value == self._qq_primary_name:
+            if not self._qq_primary_id:
+                raise ValueError("尚未配置 QQ_PRIMARY_CONTACT_ID")
+            return f"qq:private:{self._qq_primary_id}"
+        if value.startswith("qq:private:"):
+            target = value.removeprefix("qq:private:")
+            kind = "private"
+        elif value.startswith("qq:group:"):
+            target = value.removeprefix("qq:group:")
+            kind = "group"
+        elif value.startswith("群:"):
+            target = value.removeprefix("群:")
+            kind = "group"
+        else:
+            target = value
+            kind = "private"
+        if not target.isdecimal():
+            raise ValueError(
+                "QQ 模式请使用 [宇飞]、[QQ号] 或 [群:群号] 消息内容"
+            )
+        return f"qq:{kind}:{target}"
+
     async def _submit_and_print(self, contact: str, content: str) -> None:
         try:
-            result = await self._merger.submit(contact, content)
+            message = PlatformMessage(
+                platform="console",
+                account_id="local",
+                conversation_id=contact,
+                sender_id=contact,
+                message_id=f"{self._run_id}-{next(self._message_ids)}",
+                timestamp=datetime.now(UTC),
+                message_type="text",
+                text=content,
+                is_self=False,
+            )
+            result = await self._merger.submit_platform(message)
         except ModelError as exc:
             print(f"[模型错误] {exc}")
             return
@@ -106,10 +234,9 @@ class ConsoleAdapter(PlatformAdapter):
             print(f"[系统] 处理 {contact} 的消息失败，请查看日志。")
             return
         if result is not None:
-            self._print_result(result)
+            await self._send_result(result)
 
-    @staticmethod
-    def _print_result(result: DispatchResult) -> None:
+    async def _send_result(self, result: DispatchResult) -> None:
         if result.reply is None:
             if result.skip_reason == "human_takeover":
                 print(
@@ -117,5 +244,12 @@ class ConsoleAdapter(PlatformAdapter):
                     "已记录消息但不自动回复"
                 )
             return
-        suffix = f"（合并 {result.message_count} 条消息）" if result.message_count > 1 else ""
-        print(f"[{result.session_id}] 机器人{suffix}: {result.reply}")
+        await self._sender.send(
+            OutboundMessage(
+                platform="console",
+                account_id="local",
+                conversation_id=result.session_id,
+                text=result.reply,
+                metadata={"message_count": result.message_count},
+            )
+        )

@@ -19,6 +19,16 @@ class CapturingModel(ChatModel):
         return self.reply
 
 
+class SequenceCapturingModel(ChatModel):
+    def __init__(self, *replies: str) -> None:
+        self.replies = list(replies)
+        self.calls: list[tuple[Message, ...]] = []
+
+    async def generate(self, messages: Sequence[Message]) -> str:
+        self.calls.append(tuple(messages))
+        return self.replies.pop(0)
+
+
 def test_mock_model_returns_fixed_reply() -> None:
     async def scenario() -> None:
         session = Session("test")
@@ -93,5 +103,58 @@ def test_reply_engine_truncates_abnormally_long_output() -> None:
 
         assert reply == "x" * 9 + "…"
         assert len(reply) == 10
+
+    asyncio.run(scenario())
+
+
+def test_explicit_explanation_gets_one_repair_when_reply_is_too_thin() -> None:
+    async def scenario() -> None:
+        model = SequenceCapturingModel(
+            "红",
+            "红黑树通过颜色约束维持近似平衡，查找和插入通常都是对数复杂度。",
+        )
+        session = Session("test")
+        session.add_message("user", "讲讲红黑树的原理")
+        engine = ReplyEngine(
+            model,
+            repair_prompt="请补全这条信息不足的回复",
+        )
+
+        reply = await engine.generate(session)
+
+        assert reply.startswith("红黑树通过")
+        assert len(model.calls) == 2
+        assert any(
+            message.role == "system" and "请补全" in str(message.content)
+            for message in model.calls[1]
+        )
+
+    asyncio.run(scenario())
+
+
+def test_casual_short_reply_is_not_forced_to_expand() -> None:
+    async def scenario() -> None:
+        model = SequenceCapturingModel("哈哈")
+        session = Session("test")
+        session.add_message("user", "草")
+        engine = ReplyEngine(model, repair_prompt="请补全")
+
+        assert await engine.generate(session) == "哈哈"
+        assert len(model.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_repeated_one_word_loop_gets_one_repair() -> None:
+    async def scenario() -> None:
+        model = SequenceCapturingModel("红", "刚才没说清，红黑树是一种自平衡搜索树。")
+        session = Session("test")
+        session.add_message("user", "讲讲红黑树")
+        session.add_message("assistant", "红")
+        session.add_message("user", "？")
+        engine = ReplyEngine(model, repair_prompt="请正常补全")
+
+        assert "刚才没说清" in await engine.generate(session)
+        assert len(model.calls) == 2
 
     asyncio.run(scenario())

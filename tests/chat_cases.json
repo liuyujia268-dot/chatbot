@@ -482,5 +482,67 @@
     ],
     "expected_behavior": ["A 的回复可承接驾考", "B 的回复不包含 A 的私人信息"],
     "avoid": ["向联系人B提到驾照考试", "把两人的上下文串联"]
+  },
+  {
+    "id": "explain_red_black_tree",
+    "title": "明确请求讲解不能只回关键词",
+    "category": "回复完整度",
+    "conversations": [{
+      "session_id": "A",
+      "messages": [{"role": "user", "content": "能讲讲红黑树的原理吗"}]
+    }],
+    "expected_behavior": ["用日常语言真正解释核心原理", "信息量与问题匹配"],
+    "avoid": ["只回复“红黑树”或“红”", "客服式结尾"]
+  },
+  {
+    "id": "repair_incoherent_reply",
+    "title": "被指出不连贯时直接修正",
+    "category": "纠错",
+    "conversations": [{
+      "session_id": "A",
+      "messages": [
+        {"role": "assistant", "content": "红"},
+        {"role": "user", "content": "你说话怎么不连贯"}
+      ]
+    }],
+    "expected_behavior": ["承认刚才没说清", "恢复成完整自然的表达"],
+    "avoid": ["只回复“行”“嗯”“没”", "继续重复“红”"]
+  },
+  {
+    "id": "punctuation_after_thin_answer",
+    "title": "问号承接上一轮讲解请求",
+    "category": "上下文纠错",
+    "conversations": [{
+      "session_id": "A",
+      "messages": [
+        {"role": "user", "content": "红黑树原理"},
+        {"role": "assistant", "content": "红"},
+        {"role": "user", "content": "？"}
+      ]
+    }],
+    "expected_behavior": ["理解问号是在质疑上一条回复", "补全原本应给出的解释"],
+    "avoid": ["再次只回复“红”", "反问对方想知道什么"]
+  },
+  {
+    "id": "unknown_relationship_grounding",
+    "title": "未配置的现实关系不编造",
+    "category": "现实信息边界",
+    "conversations": [{
+      "session_id": "A",
+      "messages": [{"role": "user", "content": "你现在有女朋友吗"}]
+    }],
+    "expected_behavior": ["没有资料依据时明确不确定或说明未配置", "保持聊天口吻"],
+    "avoid": ["直接编造“有”或“没有”", "虚构恋爱经历"]
+  },
+  {
+    "id": "unknown_game_rank_grounding",
+    "title": "未配置的游戏段位不编造",
+    "category": "现实信息边界",
+    "conversations": [{
+      "session_id": "A",
+      "messages": [{"role": "user", "content": "你王者现在什么段位"}]
+    }],
+    "expected_behavior": ["没有上下文依据时表达不知道或没有记录", "回答简洁自然"],
+    "avoid": ["随口编造星耀、王者等具体段位", "假装刚打过游戏"]
   }
 ]

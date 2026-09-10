@@ -90,6 +90,16 @@ def _parse_confidence(name: str, value: str) -> float:
     return parsed
 
 
+def _parse_hhmm(name: str, value: str) -> str:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if match is None:
+        raise ConfigurationError(f"{name} 必须使用 HH:MM 格式")
+    hour, minute = (int(part) for part in match.groups())
+    if hour > 23 or minute > 59:
+        raise ConfigurationError(f"{name} 必须是有效的本地时间")
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _project_path(value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else PROJECT_ROOT / path
@@ -99,6 +109,7 @@ def _project_path(value: str) -> Path:
 class Settings:
     database_path: Path = PROJECT_ROOT / "data" / "chatbot.db"
     log_path: Path = PROJECT_ROOT / "data" / "chatbot.log"
+    outbound_dry_run: bool = False
     message_debounce_seconds: float = 1.2
     model_provider: str = "mock"
     model_base_url: str | None = None
@@ -110,6 +121,9 @@ class Settings:
     context_max_messages: int = 12
     model_max_output_chars: int = 1200
     system_prompt_path: Path = PROJECT_ROOT / "app" / "prompts" / "chat.txt"
+    reply_repair_prompt_path: Path = (
+        PROJECT_ROOT / "app" / "prompts" / "reply_repair.txt"
+    )
     memory_auto_process_enabled: bool = True
     memory_extraction_interval_messages: int = 12
     summary_trigger_messages: int = 24
@@ -121,6 +135,42 @@ class Settings:
     memory_prompt_path: Path = (
         PROJECT_ROOT / "app" / "prompts" / "memory_maintenance.txt"
     )
+    qq_enabled: bool = False
+    qq_ws_url: str = "ws://127.0.0.1:3001"
+    qq_ws_token: str | None = field(default=None, repr=False)
+    qq_primary_contact_id: str | None = None
+    qq_primary_contact_name: str = "宇飞"
+    qq_admin_contact_ids: tuple[str, ...] = ()
+    qq_admin_memory_prefix: str = "#指令"
+    qq_training_group_ids: tuple[str, ...] = ()
+    qq_reply_group_ids: tuple[str, ...] = ()
+    qq_dry_run: bool = True
+    qq_proactive_enabled: bool = False
+    qq_proactive_contact_ids: tuple[str, ...] = ()
+    qq_proactive_exclude_contact_ids: tuple[str, ...] = ()
+    qq_proactive_min_seconds: float = 2400.0
+    qq_proactive_max_seconds: float = 4800.0
+    qq_proactive_daily_limit: int = 3
+    qq_proactive_recent_days: int = 7
+    qq_proactive_quiet_start: str = "00:00"
+    qq_proactive_quiet_end: str = "08:00"
+    proactive_prompt_path: Path = (
+        PROJECT_ROOT / "app" / "prompts" / "proactive.txt"
+    )
+    qq_followup_enabled: bool = True
+    qq_followup_probability: float = 0.15
+    qq_followup_min_delay_seconds: float = 2.0
+    qq_followup_max_delay_seconds: float = 7.0
+    followup_prompt_path: Path = (
+        PROJECT_ROOT / "app" / "prompts" / "followup.txt"
+    )
+    qq_image_max_bytes: int = 8 * 1024 * 1024
+    qq_image_timeout_seconds: float = 10.0
+    qq_image_allow_remote_url: bool = True
+    qq_image_history_limit: int = 1
+    style_context_min_messages: int = 3
+    style_context_max_messages: int = 10
+    style_export_path: Path = PROJECT_ROOT / "data" / "style_samples.jsonl"
 
     @property
     def merge_window_seconds(self) -> float:
@@ -191,12 +241,72 @@ class Settings:
                 raise ConfigurationError("MODEL_BASE_URL 必须是安全的 HTTP(S) 基础地址")
 
         temperature_value = get("MODEL_TEMPERATURE", "0.7")
+        qq_enabled = _parse_bool("QQ_ENABLED", get("QQ_ENABLED", "false"))
+        qq_dry_run = _parse_bool("QQ_DRY_RUN", get("QQ_DRY_RUN", "true"))
+        qq_ws_url = get("QQ_WS_URL", "ws://127.0.0.1:3001")
+        parsed_qq_url = urlsplit(qq_ws_url)
+        if parsed_qq_url.scheme not in {"ws", "wss"} or not parsed_qq_url.hostname:
+            raise ConfigurationError("QQ_WS_URL 必须是 ws:// 或 wss:// 地址")
+        style_min = _parse_int(
+            "STYLE_CONTEXT_MIN_MESSAGES",
+            get("STYLE_CONTEXT_MIN_MESSAGES", "3"),
+        )
+        style_max = _parse_int(
+            "STYLE_CONTEXT_MAX_MESSAGES",
+            get("STYLE_CONTEXT_MAX_MESSAGES", "10"),
+        )
+        if style_min > style_max:
+            raise ConfigurationError("STYLE_CONTEXT_MIN_MESSAGES 不能大于最大值")
+        training_group_ids = tuple(
+            item.strip()
+            for item in get("QQ_TRAINING_GROUP_IDS").split(",")
+            if item.strip()
+        )
+        reply_group_ids = tuple(
+            item.strip()
+            for item in get("QQ_REPLY_GROUP_IDS").split(",")
+            if item.strip()
+        )
+        if set(training_group_ids) & set(reply_group_ids):
+            raise ConfigurationError(
+                "QQ_TRAINING_GROUP_IDS 与 QQ_REPLY_GROUP_IDS 不能重叠"
+            )
+        proactive_min = _parse_float(
+            "QQ_PROACTIVE_MIN_SECONDS",
+            get("QQ_PROACTIVE_MIN_SECONDS", "2400"),
+            minimum=1,
+        )
+        proactive_max = _parse_float(
+            "QQ_PROACTIVE_MAX_SECONDS",
+            get("QQ_PROACTIVE_MAX_SECONDS", "4800"),
+            minimum=1,
+        )
+        if proactive_min > proactive_max:
+            raise ConfigurationError(
+                "QQ_PROACTIVE_MIN_SECONDS 不能大于最大值"
+            )
+        followup_min = _parse_float(
+            "QQ_FOLLOWUP_MIN_DELAY_SECONDS",
+            get("QQ_FOLLOWUP_MIN_DELAY_SECONDS", "2"),
+        )
+        followup_max = _parse_float(
+            "QQ_FOLLOWUP_MAX_DELAY_SECONDS",
+            get("QQ_FOLLOWUP_MAX_DELAY_SECONDS", "7"),
+        )
+        if followup_min > followup_max:
+            raise ConfigurationError(
+                "QQ_FOLLOWUP_MIN_DELAY_SECONDS 不能大于最大值"
+            )
 
         return cls(
             database_path=_project_path(
                 get("CHATBOT_DATABASE_PATH", "data/chatbot.db")
             ),
             log_path=_project_path(get("CHATBOT_LOG_PATH", "data/chatbot.log")),
+            outbound_dry_run=_parse_bool(
+                "OUTBOUND_DRY_RUN",
+                get("OUTBOUND_DRY_RUN", "false"),
+            ),
             message_debounce_seconds=_parse_float(
                 "MESSAGE_DEBOUNCE_SECONDS",
                 get_first(
@@ -243,6 +353,12 @@ class Settings:
             system_prompt_path=_project_path(
                 get("SYSTEM_PROMPT_PATH", "app/prompts/chat.txt")
             ),
+            reply_repair_prompt_path=_project_path(
+                get(
+                    "REPLY_REPAIR_PROMPT_PATH",
+                    "app/prompts/reply_repair.txt",
+                )
+            ),
             memory_auto_process_enabled=_parse_bool(
                 "MEMORY_AUTO_PROCESS_ENABLED",
                 get("MEMORY_AUTO_PROCESS_ENABLED", "true"),
@@ -281,5 +397,91 @@ class Settings:
                     "MEMORY_PROMPT_PATH",
                     "app/prompts/memory_maintenance.txt",
                 )
+            ),
+            qq_enabled=qq_enabled,
+            qq_ws_url=qq_ws_url,
+            qq_ws_token=get("QQ_WS_TOKEN") or None,
+            qq_primary_contact_id=get("QQ_PRIMARY_CONTACT_ID") or None,
+            qq_primary_contact_name=get("QQ_PRIMARY_CONTACT_NAME", "宇飞"),
+            qq_admin_contact_ids=tuple(
+                item.strip()
+                for item in get("QQ_ADMIN_CONTACT_IDS").split(",")
+                if item.strip()
+            ),
+            qq_admin_memory_prefix=(
+                get("QQ_ADMIN_MEMORY_PREFIX", "#指令") or "#指令"
+            ),
+            qq_training_group_ids=training_group_ids,
+            qq_reply_group_ids=reply_group_ids,
+            qq_dry_run=qq_dry_run,
+            qq_proactive_enabled=_parse_bool(
+                "QQ_PROACTIVE_ENABLED",
+                get("QQ_PROACTIVE_ENABLED", "false"),
+            ),
+            qq_proactive_contact_ids=tuple(
+                item.strip()
+                for item in get("QQ_PROACTIVE_CONTACT_IDS").split(",")
+                if item.strip()
+            ),
+            qq_proactive_exclude_contact_ids=tuple(
+                item.strip()
+                for item in get("QQ_PROACTIVE_EXCLUDE_CONTACT_IDS").split(",")
+                if item.strip()
+            ),
+            qq_proactive_min_seconds=proactive_min,
+            qq_proactive_max_seconds=proactive_max,
+            qq_proactive_daily_limit=_parse_int(
+                "QQ_PROACTIVE_DAILY_LIMIT",
+                get("QQ_PROACTIVE_DAILY_LIMIT", "3"),
+            ),
+            qq_proactive_recent_days=_parse_int(
+                "QQ_PROACTIVE_RECENT_DAYS",
+                get("QQ_PROACTIVE_RECENT_DAYS", "7"),
+            ),
+            qq_proactive_quiet_start=_parse_hhmm(
+                "QQ_PROACTIVE_QUIET_START",
+                get("QQ_PROACTIVE_QUIET_START", "00:00"),
+            ),
+            qq_proactive_quiet_end=_parse_hhmm(
+                "QQ_PROACTIVE_QUIET_END",
+                get("QQ_PROACTIVE_QUIET_END", "08:00"),
+            ),
+            proactive_prompt_path=_project_path(
+                get("PROACTIVE_PROMPT_PATH", "app/prompts/proactive.txt")
+            ),
+            qq_followup_enabled=_parse_bool(
+                "QQ_FOLLOWUP_ENABLED",
+                get("QQ_FOLLOWUP_ENABLED", "true"),
+            ),
+            qq_followup_probability=_parse_confidence(
+                "QQ_FOLLOWUP_PROBABILITY",
+                get("QQ_FOLLOWUP_PROBABILITY", "0.15"),
+            ),
+            qq_followup_min_delay_seconds=followup_min,
+            qq_followup_max_delay_seconds=followup_max,
+            followup_prompt_path=_project_path(
+                get("FOLLOWUP_PROMPT_PATH", "app/prompts/followup.txt")
+            ),
+            qq_image_max_bytes=_parse_int(
+                "QQ_IMAGE_MAX_BYTES", get("QQ_IMAGE_MAX_BYTES", "8388608")
+            ),
+            qq_image_timeout_seconds=_parse_float(
+                "QQ_IMAGE_TIMEOUT_SECONDS",
+                get("QQ_IMAGE_TIMEOUT_SECONDS", "10"),
+                minimum=0.1,
+            ),
+            qq_image_allow_remote_url=_parse_bool(
+                "QQ_IMAGE_ALLOW_REMOTE_URL",
+                get("QQ_IMAGE_ALLOW_REMOTE_URL", "true"),
+            ),
+            qq_image_history_limit=_parse_int(
+                "QQ_IMAGE_HISTORY_LIMIT",
+                get("QQ_IMAGE_HISTORY_LIMIT", "1"),
+                minimum=0,
+            ),
+            style_context_min_messages=style_min,
+            style_context_max_messages=style_max,
+            style_export_path=_project_path(
+                get("STYLE_EXPORT_PATH", "data/style_samples.jsonl")
             ),
         )

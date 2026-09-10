@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
+
+from app.core.platform import MessagePart
 
 
 Role = Literal["system", "user", "assistant"]
+MessageContent = str | tuple[MessagePart, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class Message:
     role: Role
-    content: str
+    content: MessageContent
+
+    def __post_init__(self) -> None:
+        if isinstance(self.content, str):
+            if not self.content.strip():
+                raise ValueError("message content must not be empty")
+        elif not self.content:
+            raise ValueError("message parts must not be empty")
 
 
 @dataclass(slots=True)
@@ -27,7 +37,7 @@ class Session:
         if self.max_messages < 1:
             raise ValueError("max_messages must be at least 1")
 
-    def add_message(self, role: Role, content: str) -> Message:
+    def add_message(self, role: Role, content: MessageContent) -> Message:
         message = Message(role=role, content=content)
         self.messages.append(message)
         overflow = len(self.messages) - self.max_messages
@@ -38,6 +48,32 @@ class Session:
     def advance_version(self) -> int:
         self.conversation_version += 1
         return self.conversation_version
+
+    def cache_image_description(
+        self,
+        source_message_id: str,
+        part_index: int,
+        description: str,
+    ) -> None:
+        for message_index, message in enumerate(self.messages):
+            if isinstance(message.content, str):
+                continue
+            changed = False
+            parts: list[MessagePart] = []
+            for part in message.content:
+                if (
+                    part.part_type == "image"
+                    and part.source_message_id == source_message_id
+                    and part.part_index == part_index
+                ):
+                    part = replace(part, description=description[:300])
+                    changed = True
+                parts.append(part)
+            if changed:
+                self.messages[message_index] = Message(
+                    message.role,
+                    tuple(parts),
+                )
 
     @property
     def incoming_revision(self) -> int:

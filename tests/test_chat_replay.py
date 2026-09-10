@@ -12,7 +12,7 @@ from app.tools.chat_replay import load_cases, save_run, select_cases
 def test_fixed_chat_cases_cover_required_scenarios() -> None:
     cases = load_cases(PROJECT_ROOT / "tests" / "chat_cases.json")
 
-    assert 20 <= len(cases) <= 30
+    assert 20 <= len(cases) <= 40
     assert all(case["expected_behavior"] for case in cases)
     assert all(case["avoid"] for case in cases)
     assert {case["id"] for case in cases} >= {

@@ -55,7 +55,10 @@ class OpenAICompatibleModel(ChatModel):
         payload = {
             "model": self._model_name,
             "messages": [
-                {"role": message.role, "content": message.content}
+                {
+                    "role": message.role,
+                    "content": self._serialize_content(message),
+                }
                 for message in messages
             ],
             "max_tokens": self._max_output_tokens,
@@ -174,4 +177,25 @@ class OpenAICompatibleModel(ChatModel):
         content = content.strip()
         if not content:
             raise EmptyModelResponseError("模型返回了空回复，请重试。")
+        return content
+
+    @staticmethod
+    def _serialize_content(message: Message) -> Any:
+        if isinstance(message.content, str):
+            return message.content
+        content: list[dict[str, Any]] = []
+        for part in message.content:
+            if part.part_type == "text":
+                content.append({"type": "text", "text": part.text or ""})
+                continue
+            image_url = part.model_image_url
+            if image_url:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    }
+                )
+            else:
+                content.append({"type": "text", "text": part.fallback_text})
         return content

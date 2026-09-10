@@ -12,6 +12,78 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session_id
 ON messages (session_id, id);
 
+CREATE TABLE IF NOT EXISTS inbound_platform_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    event_timestamp TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    text TEXT NOT NULL,
+    parts_json TEXT NOT NULL DEFAULT '[]',
+    is_self INTEGER NOT NULL CHECK (is_self IN (0, 1)),
+    received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (platform, account_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_platform_messages_conversation
+ON inbound_platform_messages (platform, account_id, conversation_id, id);
+
+CREATE TABLE IF NOT EXISTS image_descriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    part_index INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (platform, account_id, message_id, part_index)
+);
+
+CREATE TABLE IF NOT EXISTS qq_training_group_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    event_timestamp TEXT NOT NULL,
+    text TEXT NOT NULL,
+    parts_json TEXT NOT NULL,
+    is_self INTEGER NOT NULL CHECK (is_self IN (0, 1)),
+    reply_to_message_id TEXT,
+    nickname TEXT,
+    source_type TEXT NOT NULL CHECK (
+        source_type IN ('other_user', 'human_self', 'ai_generated')
+    ),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (platform, account_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_qq_training_group_context
+ON qq_training_group_events (platform, account_id, group_id, id);
+
+CREATE TABLE IF NOT EXISTS style_samples (
+    sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    context_messages TEXT NOT NULL,
+    human_reply_message_id TEXT NOT NULL,
+    human_reply TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL DEFAULT 'candidate' CHECK (
+        status IN ('candidate', 'accepted', 'rejected')
+    ),
+    UNIQUE (platform, conversation_id, human_reply_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_style_samples_status
+ON style_samples (status, sample_id);
+
 CREATE TABLE IF NOT EXISTS conversation_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL,

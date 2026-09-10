@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from app.core.session import Message
+from app.memory.context import redact_private_information
 from app.memory.service import MemoryService
 from app.memory.types import CandidateProposal, MaintenanceReport, StoredMessage
 from app.models.base import ChatModel
@@ -103,15 +104,24 @@ class MemoryProcessor:
             previous_summary.content if previous_summary else None,
             summary_due,
         )
-        raw = await self._model.generate(
-            (
-                Message("system", self._prompt),
-                Message(
-                    "user",
-                    json.dumps(payload, ensure_ascii=False),
-                ),
-            )
+        account_profile = repository.get_account_profile()
+        private_information = (
+            account_profile.private_information if account_profile else None
         )
+        request_messages = (
+            Message(
+                "system",
+                redact_private_information(self._prompt, private_information),
+            ),
+            Message(
+                "user",
+                redact_private_information(
+                    json.dumps(payload, ensure_ascii=False),
+                    private_information,
+                ),
+            ),
+        )
+        raw = await self._model.generate(request_messages)
         output = self._parse_output(raw)
 
         summary_id: int | None = None

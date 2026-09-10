@@ -259,6 +259,60 @@ def test_new_message_cancels_and_discards_stale_reply(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_new_message_cancels_and_discards_stale_proactive_reply(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        database_path = tmp_path / "chat.db"
+        model = SlowThenFastModel()
+        dispatcher, _ = make_dispatcher(database_path, model)
+        dispatcher.receive_incoming("张三", "之前聊过的内容")
+
+        proactive_task = asyncio.create_task(
+            dispatcher.generate_proactive("张三", "自然地主动说一句")
+        )
+        await asyncio.wait_for(model.started.wait(), timeout=1)
+        fresh_reply = await dispatcher.dispatch("张三", "刚发来的新消息")
+        proactive_reply = await proactive_task
+
+        assert proactive_reply is None
+        assert fresh_reply == "fresh reply"
+        assert model.cancelled is True
+        assert [
+            (item.role, item.content)
+            for item in Database(database_path).list_messages("张三")
+        ] == [
+            ("user", "之前聊过的内容"),
+            ("user", "刚发来的新消息"),
+            ("assistant", "fresh reply"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_proactive_generation_skips_pending_debounce_batch(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        model = RecordingModel()
+        dispatcher, _ = make_dispatcher(tmp_path / "chat.db", model)
+        merger = ContinuousMessageMerger(dispatcher, debounce_seconds=0.02)
+
+        pending = asyncio.create_task(merger.submit("张三", "正在输入的新消息"))
+        await asyncio.sleep(0)
+        proactive = await merger.generate_proactive(
+            "张三",
+            "自然地主动说一句",
+        )
+        result = await pending
+
+        assert proactive is None
+        assert result is not None and result.reply == "recorded"
+        assert len(model.calls) == 1
+
+    asyncio.run(scenario())
+
+
 def test_version_check_discards_reply_even_if_model_ignores_cancellation(
     tmp_path: Path,
 ) -> None:

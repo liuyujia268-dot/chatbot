@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from app.memory.context import ContextDebugger
 from app.memory.processor import MemoryProcessor
 from app.memory.service import MemoryService
 from app.models.base import ModelError
+from app.style.repository import StyleRepository
 
 
 class AdminCommandHandler:
@@ -17,16 +19,22 @@ class AdminCommandHandler:
         processor: MemoryProcessor,
         debugger: ContextDebugger,
         *,
+        style_repository: StyleRepository | None = None,
+        style_export_path: Path | None = None,
         sink: Callable[[str], None] = print,
     ) -> None:
         self.service = service
         self.processor = processor
         self.debugger = debugger
+        self.style_repository = style_repository
+        self.style_export_path = style_export_path
         self._sink = sink
 
     async def handle(self, line: str) -> bool:
         command = line.strip()
-        if not command.startswith(("/memory", "/profile", "/account", "/debug")):
+        if not command.startswith(
+            ("/memory", "/profile", "/account", "/debug", "/style")
+        ):
             return False
         try:
             if command.startswith("/memory"):
@@ -35,6 +43,8 @@ class AdminCommandHandler:
                 self._profile(command)
             elif command.startswith("/account"):
                 self._account(command)
+            elif command.startswith("/style"):
+                self._style(command)
             else:
                 self._debug(command)
         except (ValueError, KeyError, ModelError) as exc:
@@ -260,6 +270,64 @@ class AdminCommandHandler:
             raise ValueError("用法：/debug on|off")
         self.debugger.enabled = parts[1].lower() == "on"
         self._sink(f"[Debug] {'已开启' if self.debugger.enabled else '已关闭'}")
+
+    def _style(self, command: str) -> None:
+        if self.style_repository is None:
+            raise ValueError("聊天风格样本库未启用")
+        parts = command.split()
+        action = parts[1].lower() if len(parts) > 1 else "help"
+        if action == "help":
+            self._sink(
+                "风格样本命令：\n/style stats\n/style list [status]\n"
+                "/style show <sample_id>\n/style accept <sample_id>\n"
+                "/style reject <sample_id>\n/style export"
+            )
+            return
+        if action == "stats" and len(parts) == 2:
+            stats = self.style_repository.stats()
+            self._sink(
+                "[风格样本] "
+                f"candidate={stats['candidate']} "
+                f"accepted={stats['accepted']} "
+                f"rejected={stats['rejected']}"
+            )
+            return
+        if action == "list" and len(parts) in {2, 3}:
+            status = parts[2] if len(parts) == 3 else "candidate"
+            samples = self.style_repository.list_samples(status)
+            if not samples:
+                self._sink("[风格样本] 暂无")
+                return
+            for sample in samples:
+                self._sink(
+                    f"[样本 #{sample.sample_id}] {sample.status} "
+                    f"context={len(sample.context_messages)} "
+                    f"reply={sample.human_reply[:80]}"
+                )
+            return
+        if action == "show" and len(parts) == 3:
+            sample = self.style_repository.get_sample(int(parts[2]))
+            if sample is None:
+                raise ValueError("风格样本不存在")
+            self._sink(
+                f"[样本 #{sample.sample_id}] {sample.status}\n"
+                f"context={sample.context_messages}\n"
+                f"response={sample.human_reply}"
+            )
+            return
+        if action in {"accept", "reject"} and len(parts) == 3:
+            status = "accepted" if action == "accept" else "rejected"
+            if not self.style_repository.set_status(int(parts[2]), status):
+                raise ValueError("风格样本不存在")
+            self._sink(f"[风格样本] #{parts[2]} 已标记为 {status}")
+            return
+        if action == "export" and len(parts) == 2:
+            if self.style_export_path is None:
+                raise ValueError("STYLE_EXPORT_PATH 未配置")
+            total = self.style_repository.export_accepted(self.style_export_path)
+            self._sink(f"[风格样本] 已脱敏导出 {total} 条")
+            return
+        raise ValueError("风格样本命令格式不正确，输入 /style help")
 
     @staticmethod
     def memory_help() -> str:

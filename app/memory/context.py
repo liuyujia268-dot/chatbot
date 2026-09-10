@@ -10,6 +10,23 @@ from app.memory.service import MemoryService
 from app.memory.types import AccountProfile, ContactProfile, MemoryContext
 
 
+PRIVATE_REDACTION = "[私密账号信息已隐藏]"
+
+
+def redact_private_information(text: str, private_information: str | None) -> str:
+    """Remove the configured private body and each non-empty line from text."""
+    if not private_information:
+        return text
+    values = {
+        private_information,
+        *(line.strip() for line in private_information.splitlines() if line.strip()),
+    }
+    redacted = text
+    for value in sorted(values, key=len, reverse=True):
+        redacted = redacted.replace(value, PRIVATE_REDACTION)
+    return redacted
+
+
 @dataclass(frozen=True, slots=True)
 class ModelContextSnapshot:
     conversation_id: str
@@ -94,9 +111,8 @@ def _format_account_profile(profile: AccountProfile | None) -> str:
         lines.append(f"- 可公开信息：{profile.public_information}")
     if profile.private_information:
         lines.append(
-            "- 不应主动透露的信息："
-            + profile.private_information
-            + "（只能用于避免泄露，不得主动复述）"
+            "- 已配置仅供程序保管的私密账号信息；"
+            "模型不可访问其正文"
         )
     return "\n".join(lines)
 
@@ -175,6 +191,12 @@ class ContextDebugger:
             account_fields.append("private_information=<内容隐藏>")
         lines.append("当前账号字段：" + (", ".join(account_fields) or "无"))
         rendered = "\n".join(lines)
+        private_information = (
+            context.account_profile.private_information
+            if context and context.account_profile
+            else None
+        )
+        rendered = redact_private_information(rendered, private_information)
         for secret in self._redacted_values:
             rendered = rendered.replace(secret, "***")
         return rendered

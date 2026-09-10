@@ -1,13 +1,16 @@
 # Chatbot
 
-一个保持简单、可测试、可替换的异步聊天机器人。当前支持固定回复的 `MockModel`，以及通过 Chat Completions 协议调用 Ollama、Packy 等服务的 `OpenAICompatibleModel`。QQ 和微信仍未接入。
+一个保持简单、可测试、可替换的异步聊天机器人。当前支持固定回复的
+`MockModel`、OpenAI-compatible 文本/视觉模型，以及 NapCat OneBot
+WebSocket 的 QQ 收发接入。QQ 可显式切换 Dry Run 或真实发送，微信尚未接入。
 
 ## 环境要求
 
 - Python 3.12+
 - pytest（仅测试需要）
 
-项目只有一个运行时依赖：`httpx`，用于异步模型请求、超时和取消。
+项目只有一个运行时依赖：`httpx`，用于异步模型请求和需要时的受限图片下载。
+NapCat WebSocket 接收使用 Python 标准库，不增加新的依赖。
 
 ## 首次初始化（CMD）
 
@@ -101,6 +104,7 @@ MODEL_NAME=<用户自行填写>
 | `CONTEXT_MAX_MESSAGES` | `12` | 发送给模型的最近 user/assistant 消息总数 |
 | `MODEL_MAX_OUTPUT_CHARS` | `1200` | 程序允许显示和保存的最大回复字符数 |
 | `SYSTEM_PROMPT_PATH` | `app/prompts/chat.txt` | System Prompt 文件位置 |
+| `REPLY_REPAIR_PROMPT_PATH` | `app/prompts/reply_repair.txt` | 低信息回复单次修复指令 |
 | `CHATBOT_DATABASE_PATH` | `data/chatbot.db` | SQLite 文件位置 |
 | `CHATBOT_LOG_PATH` | `data/chatbot.log` | 调试日志位置 |
 | `MESSAGE_DEBOUNCE_SECONDS` | `1.2` | 同一会话连续消息的 debounce 等待秒数 |
@@ -113,18 +117,63 @@ MODEL_NAME=<用户自行填写>
 | `MEMORY_CONTEXT_FALLBACK` | `2` | 关键词不命中时最多补入的近期记忆数 |
 | `MEMORY_DEBUG` | `false` | 是否显示本次模型实际使用的上下文 |
 | `MEMORY_PROMPT_PATH` | `app/prompts/memory_maintenance.txt` | 摘要与候选提取 Prompt |
+| `QQ_ENABLED` | `false` | 是否启动 NapCat OneBot WebSocket 事件接收 |
+| `QQ_WS_URL` | `ws://127.0.0.1:3001` | NapCat 正向 WebSocket Server 地址 |
+| `QQ_WS_TOKEN` | 空 | NapCat WebSocket Token；日志不输出正文 |
+| `QQ_PRIMARY_CONTACT_ID` | 空 | 主联系人的真实 QQ user_id，不按昵称自动绑定 |
+| `QQ_PRIMARY_CONTACT_NAME` | `宇飞` | 仅用于显示和未绑定时提示候选 |
+| `QQ_ADMIN_CONTACT_IDS` | 空 | 可使用 `#指令` 写入可追溯记忆的管理员 QQ 号 |
+| `QQ_ADMIN_MEMORY_PREFIX` | `#指令` | 管理员记忆消息前缀 |
+| `QQ_TRAINING_GROUP_IDS` | 空 | 逗号分隔的只读训练群号 |
+| `QQ_REPLY_GROUP_IDS` | 空 | 群回复白名单；仅被 @ 时回复，也参与随机主动消息 |
+| `QQ_DRY_RUN` | `true` | `false` 时通过 OneBot 动作真实发送 |
+| `QQ_PROACTIVE_ENABLED` | `false` | 是否允许受控的主动消息 |
+| `QQ_PROACTIVE_CONTACT_IDS` | 空 | 主动私聊白名单；空时使用最近活跃的私聊联系人 |
+| `QQ_PROACTIVE_EXCLUDE_CONTACT_IDS` | 空 | 永不主动联系的 QQ 号 |
+| `QQ_PROACTIVE_MIN_SECONDS` | `2400` | 每个联系人独立随机间隔下限 |
+| `QQ_PROACTIVE_MAX_SECONDS` | `4800` | 每个联系人独立随机间隔上限 |
+| `QQ_PROACTIVE_DAILY_LIMIT` | `3` | 每名联系人每天最多主动发送条数 |
+| `QQ_PROACTIVE_RECENT_DAYS` | `7` | 空白名单时纳入的最近活跃天数 |
+| `QQ_PROACTIVE_QUIET_START` | `00:00` | 本地静默时段开始 |
+| `QQ_PROACTIVE_QUIET_END` | `08:00` | 本地静默时段结束 |
+| `PROACTIVE_PROMPT_PATH` | `app/prompts/proactive.txt` | 主动消息生成指令文件 |
+| `QQ_FOLLOWUP_ENABLED` | `true` | 是否允许概率追加第二条回复 |
+| `QQ_FOLLOWUP_PROBABILITY` | `0.15` | 首条成功发送后的追加概率 |
+| `QQ_FOLLOWUP_MIN_DELAY_SECONDS` | `2` | 追加回复最短延迟 |
+| `QQ_FOLLOWUP_MAX_DELAY_SECONDS` | `7` | 追加回复最长延迟 |
+| `FOLLOWUP_PROMPT_PATH` | `app/prompts/followup.txt` | 追加回复生成指令 |
+| `QQ_IMAGE_MAX_BYTES` | `8388608` | 单张 QQ 图片允许的最大字节数 |
+| `QQ_IMAGE_TIMEOUT_SECONDS` | `10` | 需要本地转码时的图片下载超时 |
+| `QQ_IMAGE_ALLOW_REMOTE_URL` | `true` | 模型 Provider 是否可直接读取远程 image_url |
+| `QQ_IMAGE_HISTORY_LIMIT` | `1` | 历史上下文最多重复发送的原图消息数 |
+| `STYLE_CONTEXT_MIN_MESSAGES` | `3` | 生成风格候选所需的最少前文数 |
+| `STYLE_CONTEXT_MAX_MESSAGES` | `10` | 风格候选最多保留的前文数 |
+| `STYLE_EXPORT_PATH` | `data/style_samples.jsonl` | 已接受样本的脱敏 JSONL 输出位置 |
 
 旧名称 `MODEL_HISTORY_LIMIT`、`MODEL_MAX_OUTPUT_TOKENS` 和
 `CHATBOT_MERGE_WINDOW` 仍兼容，但建议新配置统一使用表中的名称。
 
 ## 命令行聊天
 
-输入格式：
+`QQ_ENABLED=false` 时，输入会作为本地模拟的入站消息：
 
 ```text
 [张三] 你好
 [李四] 在吗
 ```
+
+`QQ_ENABLED=true` 时，同样的输入改为当前账号通过 NapCat 直接发送，
+不会送给模型当作测试消息：
+
+```text
+[宇飞] 这是发给主联系人的人工消息
+[12345678] 这是发给指定 QQ 号的私聊
+[群:87654321] 这是发给指定群的人工消息
+```
+
+主联系人名称按 `QQ_PRIMARY_CONTACT_NAME` 映射到
+`QQ_PRIMARY_CONTACT_ID`。人工发送使用独立 Sender，不会标记成
+`ai_generated`；`QQ_DRY_RUN=true` 时仍只记录而不实际发出。
 
 不同联系人使用独立会话和独立 debounce 计时器。相同联系人在等待窗口内
 连续输入的消息只触发一次模型调用；每条原始消息分别保存到 SQLite，也会以
@@ -140,13 +189,123 @@ system prompt 不计入该数量。内存会话使用同一上限，不会无限
 ```text
 /takeover 张三 on
 /takeover 张三 off
+/takeover 宇飞 on
+/takeover 12345678 off
 ```
 
+本地模拟模式使用联系人名称；QQ 模式既可使用
+`QQ_PRIMARY_CONTACT_NAME`，也可直接使用 QQ user_id。
 开启接管后，该联系人的新消息仍会保存，但不会调用模型。生成中的旧回复会被
 取消，且不再显示或保存。消息到达时会递增该会话的
 `conversation_version`；每次生成同时记录独立 `generation_id`。发布回复前
 必须同时匹配最新会话版本和活动生成编号，否则回复按过期结果丢弃。版本校验是
 最终防线，即使模型请求没有正确响应取消，也不能发布旧回复。
+
+## NapCat QQ 收发接入
+
+先在 NapCat WebUI 中人工启用 OneBot 正向 WebSocket Server，并记录地址和
+Token。若需要采集当前 QQ 账号本人手动发送的消息，还需人工开启该连接的
+`reportSelfMessage`。程序不会修改 NapCat 配置。
+
+在 `.env` 中填写真实 ID；昵称只用于显示，不能代替 user_id：
+
+```dotenv
+QQ_ENABLED=true
+QQ_WS_URL=ws://127.0.0.1:3001
+QQ_WS_TOKEN=<NapCat WebSocket Token>
+QQ_PRIMARY_CONTACT_ID=<主联系人 QQ user_id>
+QQ_PRIMARY_CONTACT_NAME=宇飞
+QQ_ADMIN_CONTACT_IDS=<管理员 QQ号>
+QQ_ADMIN_MEMORY_PREFIX=#指令
+QQ_TRAINING_GROUP_IDS=<群号1>,<群号2>
+QQ_REPLY_GROUP_IDS=
+QQ_DRY_RUN=false
+
+QQ_PROACTIVE_ENABLED=true
+QQ_PROACTIVE_CONTACT_IDS=
+QQ_PROACTIVE_EXCLUDE_CONTACT_IDS=
+QQ_PROACTIVE_MIN_SECONDS=2400
+QQ_PROACTIVE_MAX_SECONDS=4800
+QQ_PROACTIVE_DAILY_LIMIT=3
+QQ_PROACTIVE_RECENT_DAYS=7
+QQ_PROACTIVE_QUIET_START=00:00
+QQ_PROACTIVE_QUIET_END=08:00
+
+QQ_FOLLOWUP_ENABLED=true
+QQ_FOLLOWUP_PROBABILITY=0.15
+QQ_FOLLOWUP_MIN_DELAY_SECONDS=2
+QQ_FOLLOWUP_MAX_DELAY_SECONDS=7
+```
+
+所有非本人私聊都复用现有 Dispatcher 并生成回复；`QQ_DRY_RUN=false`
+时会通过 NapCat 真实发送。昵称只用于显示，主联系人身份仍按 user_id 识别。
+训练群只保存本地原始事件和样本候选，不进入私聊历史、记忆或聊天模型。
+只有 `QQ_REPLY_GROUP_IDS` 中的群允许回复，且仅在消息明确 @ 当前账号时回复；
+配置层禁止回复群与训练群重叠。回复群的普通消息只保存为该群的上下文。
+本人消息标记为 `human_self`，不会触发回复，并会开启对应会话的人工接管；
+`ai_generated` 永远不能成为
+真人风格训练目标。
+
+主动消息对每个目标独立安排 40～80 分钟的随机时间。私聊白名单留空时使用
+最近活跃联系人；发出一条但对方尚未回复时不会继续催发。训练群永不参与。
+
+管理员发送 `#指令 [详细语句]` 时，该语句会作为管理员私聊会话的长期记忆
+保存并保留原始消息来源；非管理员发送相同格式只会作为普通聊天文本。
+主动消息按配置的随机区间安排，并限制每名联系人每日条数。生成期间若收到
+该联系人的新消息，旧主动回复会被版本机制取消和丢弃。
+
+图片与同一消息内的文本按 OneBot 消息段原顺序进入视觉模型。当前图片可以直接
+使用远程 `image_url`；若 Provider 不支持，可将
+`QQ_IMAGE_ALLOW_REMOTE_URL=false`，程序会按超时、大小和 Content-Type
+限制下载到临时目录并转成 data URL，临时文件随后删除。较旧图片默认只保留
+摘要或模型理解后的简短描述，不重复发送原图。
+
+## 消息链路与安全边界
+
+QQ 消息只使用一套处理链路：
+
+```text
+OneBot Event
+  -> QQ Adapter
+  -> PlatformMessage
+  -> SQLite 持久化去重
+  -> 私聊 / 回复群 / 训练群路由
+```
+
+私聊和允许回复的群会继续经过 debounce、Dispatcher、上下文组装、模型调用、
+`conversation_version` 校验和 OutboundSender。低信息或明显答非所问的结果
+最多修复一次；首条回复成功后，可按配置概率在短暂延迟后追加第二条。任何新消息
+或人工接管都会使尚未发送的旧生成失效。
+
+训练群只在本地保存原始事件，并从当前账号真实发送的 `human_self` 文本中建立
+`candidate` 风格样本；不调用聊天模型、不自动回复，也不进入任何私聊记忆。
+`ai_generated` 消息不会成为真人风格训练目标。
+
+管理命令只由本地控制台解释。外部聊天中的 `/memory`、`/profile`、
+`/account` 或 `/debug` 只按普通文本处理。管理员私聊的 `#指令` 是单独、
+受 QQ user_id 白名单约束的记忆入口，不会获得其他本地管理权限。
+
+`current_account_profile.private_information` 可以保存在 SQLite，但不会进入
+聊天模型、记忆维护模型或摘要模型的任何请求；`/account show` 与 Debug 也不
+显示正文。本人消息通过 OneBot 的 `self_id` 和发送者 ID 识别，保存为
+`human_self`、开启相应会话人工接管，并禁止再次触发模型，避免消息循环。
+
+`QQ_DRY_RUN=true` 是模板默认值；只有显式设为 `false` 才会调用 OneBot
+发送动作。训练群无论该开关为何值都不会自动发送。
+
+风格样本只能从本地 CLI 人工管理：
+
+```text
+/style stats
+/style list
+/style show 1
+/style accept 1
+/style reject 1
+/style export
+```
+
+`/style export` 默认只导出 `accepted` 样本，并移除 QQ号、群号、昵称、
+message_id 和真实时间戳。
 
 ## 长期记忆
 
@@ -171,7 +330,7 @@ system prompt 不计入该数量。内存会话使用同一上限，不会无限
 
 ### 记忆与画像管理命令
 
-以下命令直接在运行中的聊天模拟器输入。`source_ids` 是逗号分隔的原始 user
+以下命令直接在运行中的本地管理控制台输入。`source_ids` 是逗号分隔的原始 user
 消息 ID；可先用 `/memory candidates 联系人` 查看自动生成的候选及编号。
 
 ```text
@@ -225,7 +384,7 @@ pytest 中的模型测试全部使用 MockModel 或 Fake Client，不会连接�
 
 ### 手动聊天回放
 
-固定测试集位于 `tests\chat_cases.json`，包含 29 组非唯一答案的中文聊天
+固定测试集位于 `tests\chat_cases.json`，包含 34 组非唯一答案的中文聊天
 场景。运行前确认 `.env` 已配置真实模型：
 
 ```bat
@@ -257,8 +416,8 @@ pytest 中的模型测试全部使用 MockModel 或 Fake Client，不会连接�
 
 ## 尚未实现
 
-- QQ/NapCat 和微信/wxauto 适配器
+- 微信/wxauto 适配器；QQ群当前仅支持训练群只读采集，以及白名单群被 @ 后回复和受控主动消息
 - embedding、向量数据库和语义检索（当前仅关键词/类型/最近使用筛选）
 - 自动从低置信度 `pending` 候选学习；仍需要人工接受
 - 多 Agent、工具调用和联网搜索
-- 图片、语音和 Web 管理后台
+- 语音、表情包分析和 Web 管理后台

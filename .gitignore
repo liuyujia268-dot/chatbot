@@ -15,6 +15,8 @@ data/*.db-shm
 data/*.db-wal
 data/*.log
 data/chat_replay_results*.json
+data/style_samples*.jsonl
 .idea/
 .vscode/
+*.lnk
 /gitee令牌.txt

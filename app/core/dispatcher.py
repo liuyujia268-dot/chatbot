@@ -8,6 +8,7 @@ from itertools import count
 from typing import Protocol
 
 from app.core.memory import InMemoryStore
+from app.core.platform import PlatformMessage
 from app.core.reply_engine import ReplyEngine
 from app.core.session import Message, Session, SessionManager
 from app.storage.database import Database
@@ -82,6 +83,99 @@ class MessageDispatcher:
             reply = await generation.task
             if not self._can_publish(session_id, generation):
                 return None
+            self._cache_current_image_descriptions(session, reply)
+            assistant_message = Message(role="assistant", content=reply)
+            self._database.save_message(session_id, assistant_message)
+            session.add_message(assistant_message.role, assistant_message.content)
+            self._memory.append(session_id, assistant_message)
+            if self._maintenance is not None:
+                self._maintenance.schedule(session_id)
+            return reply
+        except asyncio.CancelledError:
+            if not self._can_publish(session_id, generation):
+                return None
+            raise
+        finally:
+            if self._active_generations.get(session_id) == generation:
+                self._active_generations.pop(session_id, None)
+
+    async def generate_proactive(
+        self,
+        session_id: str,
+        instruction: str,
+    ) -> str | None:
+        """Generate one unsolicited message without fabricating an inbound turn."""
+        if not instruction.strip():
+            raise ValueError("proactive instruction must not be empty")
+        session = self._ensure_session_loaded(session_id)
+        if (
+            session.human_takeover
+            or not session.messages
+            or session_id in self._active_generations
+        ):
+            return None
+        version = session.conversation_version
+        messages = list(self._engine.build_model_messages(session))
+        insert_at = 0
+        while insert_at < len(messages) and messages[insert_at].role == "system":
+            insert_at += 1
+        messages.insert(insert_at, Message("system", instruction.strip()))
+        generation = _ActiveGeneration(
+            generation_id=next(self._generation_ids),
+            conversation_version=version,
+            task=asyncio.create_task(self._engine.generate_messages(messages)),
+        )
+        self._active_generations[session_id] = generation
+        try:
+            reply = await generation.task
+            if not self._can_publish(session_id, generation):
+                return None
+            assistant_message = Message(role="assistant", content=reply)
+            self._database.save_message(session_id, assistant_message)
+            session.add_message(assistant_message.role, assistant_message.content)
+            self._memory.append(session_id, assistant_message)
+            if self._maintenance is not None:
+                self._maintenance.schedule(session_id)
+            return reply
+        except asyncio.CancelledError:
+            if not self._can_publish(session_id, generation):
+                return None
+            raise
+        finally:
+            if self._active_generations.get(session_id) == generation:
+                self._active_generations.pop(session_id, None)
+
+    async def generate_followup(
+        self,
+        session_id: str,
+        expected_version: int,
+        instruction: str,
+    ) -> str | None:
+        """Generate a second message only while the first reply is still current."""
+        if not instruction.strip():
+            raise ValueError("follow-up instruction must not be empty")
+        session = self._ensure_session_loaded(session_id)
+        if (
+            session.human_takeover
+            or session.conversation_version != expected_version
+            or session_id in self._active_generations
+        ):
+            return None
+        messages = list(self._engine.build_model_messages(session))
+        insert_at = 0
+        while insert_at < len(messages) and messages[insert_at].role == "system":
+            insert_at += 1
+        messages.insert(insert_at, Message("system", instruction.strip()))
+        generation = _ActiveGeneration(
+            generation_id=next(self._generation_ids),
+            conversation_version=expected_version,
+            task=asyncio.create_task(self._engine.generate_messages(messages)),
+        )
+        self._active_generations[session_id] = generation
+        try:
+            reply = await generation.task
+            if not self._can_publish(session_id, generation):
+                return None
             assistant_message = Message(role="assistant", content=reply)
             self._database.save_message(session_id, assistant_message)
             session.add_message(assistant_message.role, assistant_message.content)
@@ -126,6 +220,71 @@ class MessageDispatcher:
         session.add_message(message.role, message.content)
         self._memory.append(session_id, message)
         return self._advance_conversation(session_id)
+
+    def receive_platform_message(
+        self,
+        message: PlatformMessage,
+    ) -> int | None:
+        """Persist a platform text once; never interpret its text as a command."""
+        if message.is_self:
+            return None
+        session = self._ensure_session_loaded(message.conversation_id)
+        if not self._database.save_inbound_platform_message(message):
+            return None
+        content = message.parts if message.has_images else message.storage_text
+        incoming = Message(role="user", content=content)
+        session.add_message(incoming.role, incoming.content)
+        self._memory.append(message.conversation_id, incoming)
+        return self._advance_conversation(message.conversation_id)
+
+    def receive_human_self_platform_message(
+        self,
+        message: PlatformMessage,
+    ) -> bool:
+        """Record a real operator message and hand that conversation to them."""
+        if not message.is_self:
+            raise ValueError("human self message must have is_self=true")
+        session = self._ensure_session_loaded(message.conversation_id)
+        if not self._database.save_human_self_platform_message(message):
+            return False
+        outgoing = Message(role="assistant", content=message.storage_text)
+        session.add_message(outgoing.role, outgoing.content)
+        self._memory.append(message.conversation_id, outgoing)
+        self._advance_conversation(message.conversation_id)
+        self._sessions.set_human_takeover(message.conversation_id, True)
+        return True
+
+    def _cache_current_image_descriptions(
+        self,
+        session: Session,
+        reply: str,
+    ) -> None:
+        for message in reversed(session.messages):
+            if message.role == "assistant":
+                break
+            if isinstance(message.content, str):
+                continue
+            for part in message.content:
+                if (
+                    part.part_type != "image"
+                    or not part.source_platform
+                    or not part.source_account_id
+                    or not part.source_message_id
+                    or part.part_index is None
+                ):
+                    continue
+                self._database.save_image_description(
+                    platform=part.source_platform,
+                    account_id=part.source_account_id,
+                    message_id=part.source_message_id,
+                    part_index=part.part_index,
+                    description=reply,
+                )
+                session.cache_image_description(
+                    part.source_message_id,
+                    part.part_index,
+                    reply,
+                )
 
     def _ensure_session_loaded(self, session_id: str) -> Session:
         session = self._sessions.get_or_create(session_id)
@@ -231,10 +390,65 @@ class ContinuousMessageMerger:
             raise ValueError("message content must not be empty")
 
         version = self._dispatcher.receive_incoming(session_id, content.strip())
+        return await self._enqueue(session_id, content.strip(), version)
+
+    async def submit_platform(
+        self,
+        message: PlatformMessage,
+    ) -> DispatchResult | None:
+        """Ordinary external-input path; slash-prefixed text stays chat text."""
+        version = self._dispatcher.receive_platform_message(message)
+        if version is None:
+            return None
+        return await self._enqueue(
+            message.conversation_id,
+            message.storage_text,
+            version,
+        )
+
+    def record_platform(self, message: PlatformMessage) -> int | None:
+        """Record and version an external message without scheduling a reply."""
+        return self._dispatcher.receive_platform_message(message)
+
+    async def generate_proactive(
+        self,
+        session_id: str,
+        instruction: str,
+    ) -> str | None:
+        if session_id in self._pending:
+            return None
+        return await self._dispatcher.generate_proactive(session_id, instruction)
+
+    async def generate_followup(
+        self,
+        session_id: str,
+        expected_version: int,
+        instruction: str,
+    ) -> str | None:
+        if session_id in self._pending:
+            return None
+        return await self._dispatcher.generate_followup(
+            session_id,
+            expected_version,
+            instruction,
+        )
+
+    def record_human_self_platform(self, message: PlatformMessage) -> bool:
+        return self._dispatcher.receive_human_self_platform_message(message)
+
+    def is_human_takeover(self, session_id: str) -> bool:
+        return self._dispatcher.is_human_takeover(session_id)
+
+    async def _enqueue(
+        self,
+        session_id: str,
+        content: str,
+        version: int,
+    ) -> DispatchResult | None:
         loop = asyncio.get_running_loop()
         waiter: asyncio.Future[DispatchResult | None] = loop.create_future()
         batch = self._pending.setdefault(session_id, _PendingBatch())
-        batch.messages.append(content.strip())
+        batch.messages.append(content)
         batch.waiters.append(waiter)
         batch.conversation_version = version
         if self._dispatcher.is_human_takeover(session_id):
