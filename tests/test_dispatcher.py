@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from app.core.dispatcher import ContinuousMessageMerger, MessageDispatcher
 from app.core.memory import InMemoryStore
+from app.core.platform import PlatformMessage
 from app.core.reply_engine import ReplyEngine
 from app.core.session import Message, SessionManager
 from app.models.base import ChatModel, ModelConnectionError
@@ -209,6 +211,31 @@ def test_human_takeover_never_calls_model(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_merger_can_resume_auto_reply_after_human_takeover(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        model = RecordingModel()
+        dispatcher, _ = make_dispatcher(tmp_path / "chat.db", model)
+        merger = ContinuousMessageMerger(dispatcher, debounce_seconds=0)
+        merger.set_human_takeover("张三", True)
+
+        blocked = await merger.submit("张三", "人工接管期间")
+
+        assert blocked is not None
+        assert blocked.skip_reason == "human_takeover"
+        assert model.calls == []
+
+        merger.set_human_takeover("张三", False)
+        resumed = await merger.submit("张三", "恢复自动回复")
+
+        assert resumed is not None
+        assert resumed.reply == "recorded"
+        assert len(model.calls) == 1
+
+    asyncio.run(scenario())
+
+
 def test_message_received_during_takeover_stays_manual_after_resume(
     tmp_path: Path,
 ) -> None:
@@ -398,6 +425,46 @@ def test_human_takeover_cancels_in_progress_reply(tmp_path: Path) -> None:
         assert [
             item.role for item in Database(tmp_path / "chat.db").list_messages("张三")
         ] == ["user"]
+
+    asyncio.run(scenario())
+
+
+def test_human_message_cancels_current_reply_but_next_message_auto_replies(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        model = SlowThenFastModel()
+        dispatcher, _ = make_dispatcher(tmp_path / "chat.db", model)
+        merger = ContinuousMessageMerger(dispatcher, debounce_seconds=0)
+
+        current = asyncio.create_task(merger.submit("qq:private:20002", "你在吗"))
+        await asyncio.wait_for(model.started.wait(), timeout=1)
+        recorded = merger.record_human_self_platform(
+            PlatformMessage(
+                platform="qq",
+                account_id="10001",
+                conversation_id="qq:private:20002",
+                sender_id="10001",
+                message_id="manual-reply",
+                timestamp=datetime.now(UTC),
+                message_type="text",
+                text="我人工回了",
+                is_self=True,
+            )
+        )
+        interrupted = await current
+
+        assert recorded is True
+        assert interrupted is not None
+        assert interrupted.reply is None
+        assert interrupted.skip_reason == "stale"
+        assert model.cancelled is True
+        assert merger.is_human_takeover("qq:private:20002") is False
+
+        next_result = await merger.submit("qq:private:20002", "下一条消息")
+
+        assert next_result is not None
+        assert next_result.reply == "fresh reply"
 
     asyncio.run(scenario())
 

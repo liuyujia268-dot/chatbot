@@ -53,6 +53,7 @@ class QQAdapter(PlatformAdapter):
         memory_service: MemoryService | None = None,
         reply_group_ids: tuple[str, ...] = (),
         dry_run: bool = True,
+        auto_reply_enabled: bool = True,
         proactive_enabled: bool = False,
         proactive_contact_ids: tuple[str, ...] = (),
         proactive_exclude_contact_ids: tuple[str, ...] = (),
@@ -95,6 +96,7 @@ class QQAdapter(PlatformAdapter):
             DryRunMessageSender(concrete_sender) if dry_run else concrete_sender
         )
         self._dry_run = dry_run
+        self._auto_reply_enabled = auto_reply_enabled
         self._sink = sink
         self._ai_generated_ids = (
             ai_generated_message_ids
@@ -155,28 +157,44 @@ class QQAdapter(PlatformAdapter):
             return tuple(self._sender.records)
         return ()
 
+    @property
+    def auto_reply_enabled(self) -> bool:
+        return self._auto_reply_enabled
+
+    @property
+    def proactive_enabled(self) -> bool:
+        return self._proactive_enabled
+
+    @property
+    def followup_enabled(self) -> bool:
+        return self._followup_enabled
+
+    def set_auto_reply_enabled(self, enabled: bool) -> None:
+        self._auto_reply_enabled = bool(enabled)
+
+    def set_proactive_enabled(self, enabled: bool) -> None:
+        self._proactive_enabled = bool(enabled)
+        self._proactive_wakeup.set()
+
+    def set_followup_enabled(self, enabled: bool) -> None:
+        self._followup_enabled = bool(enabled)
+
     async def run(self) -> None:
         if self._event_source is None:
             raise RuntimeError("QQ event source is not configured")
         tasks: set[asyncio.Task[None]] = set()
-        proactive_task = (
-            asyncio.create_task(self._run_proactive_loop())
-            if self._proactive_enabled
-            else None
-        )
+        proactive_task = asyncio.create_task(self._run_proactive_loop())
         try:
             async for event in self._event_source:
                 task = asyncio.create_task(self._handle_event_safely(event))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         finally:
-            if proactive_task is not None:
-                proactive_task.cancel()
+            proactive_task.cancel()
             for task in tasks:
                 task.cancel()
             pending = [*tasks]
-            if proactive_task is not None:
-                pending.append(proactive_task)
+            pending.append(proactive_task)
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
@@ -275,6 +293,9 @@ class QQAdapter(PlatformAdapter):
         if admin_instruction is not None:
             self._record_admin_memory(message, admin_instruction)
             return None
+        if not self._auto_reply_enabled:
+            self._merger.record_platform(message)
+            return None
 
         resolved = await self._resolve_images(message)
         has_text = any(part.part_type == "text" for part in resolved.parts)
@@ -293,6 +314,10 @@ class QQAdapter(PlatformAdapter):
     async def _run_proactive_loop(self) -> None:
         while True:
             try:
+                if not self._proactive_enabled:
+                    await self._proactive_wakeup.wait()
+                    self._proactive_wakeup.clear()
+                    continue
                 self._load_saved_proactive_targets()
                 due_values = [
                     due
@@ -593,6 +618,8 @@ class QQAdapter(PlatformAdapter):
         result: DispatchResult,
         display_name: str,
     ) -> None:
+        if not self._auto_reply_enabled:
+            return
         message = parsed.message
         outbound = OutboundMessage(
             platform="qq",
@@ -625,7 +652,8 @@ class QQAdapter(PlatformAdapter):
         label: str,
     ) -> None:
         if (
-            not self._followup_enabled
+            not self._auto_reply_enabled
+            or not self._followup_enabled
             or self._random.random() >= self._followup_probability
         ):
             return
@@ -641,6 +669,8 @@ class QQAdapter(PlatformAdapter):
             self._followup_prompt,
         )
         if reply is None:
+            return
+        if not self._auto_reply_enabled or not self._followup_enabled:
             return
         await self._sender.send(replace(outbound, text=reply))
         self._schedule_proactive(outbound.conversation_id)
@@ -686,6 +716,9 @@ class QQAdapter(PlatformAdapter):
                 )
             return None
         self._awaiting_proactive_reply.discard(message.conversation_id)
+        if not self._auto_reply_enabled:
+            self._merger.record_platform(message)
+            return None
         if not parsed.mentions_self:
             self._merger.record_platform(message)
             return None
@@ -706,6 +739,8 @@ class QQAdapter(PlatformAdapter):
             return
         result = await self._merger.submit_platform(resolved)
         if result is not None and result.reply is not None:
+            if not self._auto_reply_enabled:
+                return result
             outbound = OutboundMessage(
                 platform="qq",
                 account_id=message.account_id,

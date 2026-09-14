@@ -167,6 +167,9 @@ def test_qq_and_image_configuration_is_loaded(tmp_path: Path) -> None:
         env_file=tmp_path / ".env",
         environ={
             "QQ_ENABLED": "true",
+            "QQ_WEBUI_URL": "http://127.0.0.1:6099/webui/",
+            "QQ_WEBUI_TOKEN": "webui-test-token",
+            "QQ_WEBUI_CONFIG_PATH": "C:/NapCat.Shell/config/webui.json",
             "QQ_WS_URL": "ws://127.0.0.1:3001",
             "QQ_WS_TOKEN": "test-token",
             "QQ_PRIMARY_CONTACT_ID": "20002",
@@ -196,6 +199,10 @@ def test_qq_and_image_configuration_is_loaded(tmp_path: Path) -> None:
     )
 
     assert settings.qq_enabled is True
+    assert settings.qq_webui_token == "webui-test-token"
+    assert settings.qq_webui_config_path == Path(
+        "C:/NapCat.Shell/config/webui.json"
+    )
     assert settings.qq_primary_contact_id == "20002"
     assert settings.qq_admin_contact_ids == ("20002", "20003")
     assert settings.qq_admin_memory_prefix == "#指令"
@@ -220,6 +227,7 @@ def test_qq_and_image_configuration_is_loaded(tmp_path: Path) -> None:
     assert settings.qq_image_allow_remote_url is False
     assert settings.qq_image_history_limit == 1
     assert "test-token" not in repr(settings)
+    assert "webui-test-token" not in repr(settings)
 
 
 def test_qq_real_sending_can_be_enabled_explicitly(tmp_path: Path) -> None:

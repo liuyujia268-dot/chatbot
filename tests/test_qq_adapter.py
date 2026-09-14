@@ -393,6 +393,22 @@ def test_non_primary_private_enters_dispatcher_and_stays_dry_run(
     asyncio.run(scenario())
 
 
+def test_runtime_auto_reply_switch_records_without_calling_model(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        adapter, model, _, database, _ = make_adapter(tmp_path / "chat.db")
+        adapter.set_auto_reply_enabled(False)
+
+        result = await adapter.handle_event(event("auto-off", "先别回复"))
+
+        assert result is None
+        assert model.calls == []
+        assert database.list_messages("qq:private:20002")[-1].content == "先别回复"
+
+    asyncio.run(scenario())
+
+
 def test_matching_nickname_is_only_a_candidate_without_configured_id(
     tmp_path: Path,
 ) -> None:
@@ -459,6 +475,43 @@ def test_admin_instruction_creates_traceable_memory_without_model(
     asyncio.run(scenario())
 
 
+def test_admin_identity_uses_exact_qq_id_and_never_nickname(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        admin_id = "2945614196"
+        shared_nickname = "管理员昵称也可能变化"
+        adapter, model, _, database, _ = make_adapter(
+            tmp_path / "chat.db",
+            admin_ids=(admin_id,),
+        )
+
+        await adapter.handle_event(
+            event(
+                "real-admin",
+                "#指令 [只认QQ号]",
+                user_id=admin_id,
+                nickname=shared_nickname,
+            )
+        )
+        impostor = await adapter.handle_event(
+            event(
+                "same-name-not-admin",
+                "#指令 [不应获得管理员权限]",
+                user_id="30003",
+                nickname=shared_nickname,
+            )
+        )
+
+        repository = MemoryRepository(database)
+        assert len(repository.list_memories(f"qq:private:{admin_id}")) == 1
+        assert repository.list_memories("qq:private:30003") == []
+        assert impostor is not None
+        assert len(model.calls) == 1
+
+    asyncio.run(scenario())
+
+
 def test_non_admin_cannot_execute_admin_memory_instruction(
     tmp_path: Path,
 ) -> None:
@@ -485,7 +538,7 @@ def test_non_admin_cannot_execute_admin_memory_instruction(
     asyncio.run(scenario())
 
 
-def test_mobile_self_message_uses_account_sender_and_enables_takeover(
+def test_mobile_self_message_interrupts_once_without_persistent_takeover(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -502,13 +555,13 @@ def test_mobile_self_message_uses_account_sender_and_enables_takeover(
         await adapter.handle_event(mobile_self_event("mobile-self"))
         result = await adapter.handle_event(event("after-mobile", "你还在吗"))
 
-        assert result is not None
-        assert result.skip_reason == "human_takeover"
-        assert model.calls == []
+        assert result is not None and result.reply == "候选回复"
+        assert len(model.calls) == 1
         stored = database.list_messages("qq:private:20002")
         assert [(item.role, item.content) for item in stored] == [
             ("assistant", "我来人工回复"),
             ("user", "你还在吗"),
+            ("assistant", "候选回复"),
         ]
 
     asyncio.run(scenario())

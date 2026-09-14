@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MessageSender(Protocol):
-    async def send(self, message: OutboundMessage) -> None: ...
+    async def send(self, message: OutboundMessage) -> str | None: ...
 
 
 class OneBotActionClient(Protocol):
@@ -23,7 +23,7 @@ class OneBotActionClient(Protocol):
         params: dict[str, Any],
         *,
         timeout_seconds: float = 10.0,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any] | list[Any]: ...
 
 
 class ConsoleMessageSender:
@@ -66,7 +66,7 @@ class NapCatMessageSender:
         self._client = client
         self._on_sent = on_sent
 
-    async def send(self, message: OutboundMessage) -> None:
+    async def send(self, message: OutboundMessage) -> str | None:
         prefix, separator, target_id = message.conversation_id.rpartition(":")
         if not separator or not target_id:
             raise ValueError("invalid QQ conversation_id")
@@ -88,3 +88,4 @@ class NapCatMessageSender:
             message.conversation_id,
             len(message.text),
         )
+        return message_id or None

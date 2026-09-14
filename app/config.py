@@ -136,6 +136,12 @@ class Settings:
         PROJECT_ROOT / "app" / "prompts" / "memory_maintenance.txt"
     )
     qq_enabled: bool = False
+    qq_webui_url: str = field(
+        default="http://127.0.0.1:6099/webui/",
+        repr=False,
+    )
+    qq_webui_token: str | None = field(default=None, repr=False)
+    qq_webui_config_path: Path | None = None
     qq_ws_url: str = "ws://127.0.0.1:3001"
     qq_ws_token: str | None = field(default=None, repr=False)
     qq_primary_contact_id: str | None = None
@@ -145,6 +151,7 @@ class Settings:
     qq_training_group_ids: tuple[str, ...] = ()
     qq_reply_group_ids: tuple[str, ...] = ()
     qq_dry_run: bool = True
+    qq_auto_reply_enabled: bool = True
     qq_proactive_enabled: bool = False
     qq_proactive_contact_ids: tuple[str, ...] = ()
     qq_proactive_exclude_contact_ids: tuple[str, ...] = ()
@@ -171,6 +178,8 @@ class Settings:
     style_context_min_messages: int = 3
     style_context_max_messages: int = 10
     style_export_path: Path = PROJECT_ROOT / "data" / "style_samples.jsonl"
+    desktop_auto_show_media: bool = False
+    desktop_history_message_limit: int = 50
 
     @property
     def merge_window_seconds(self) -> float:
@@ -243,6 +252,16 @@ class Settings:
         temperature_value = get("MODEL_TEMPERATURE", "0.7")
         qq_enabled = _parse_bool("QQ_ENABLED", get("QQ_ENABLED", "false"))
         qq_dry_run = _parse_bool("QQ_DRY_RUN", get("QQ_DRY_RUN", "true"))
+        qq_webui_url = get(
+            "QQ_WEBUI_URL",
+            "http://127.0.0.1:6099/webui/",
+        )
+        parsed_webui_url = urlsplit(qq_webui_url)
+        if (
+            parsed_webui_url.scheme not in {"http", "https"}
+            or not parsed_webui_url.hostname
+        ):
+            raise ConfigurationError("QQ_WEBUI_URL 必须是 HTTP(S) 地址")
         qq_ws_url = get("QQ_WS_URL", "ws://127.0.0.1:3001")
         parsed_qq_url = urlsplit(qq_ws_url)
         if parsed_qq_url.scheme not in {"ws", "wss"} or not parsed_qq_url.hostname:
@@ -399,6 +418,13 @@ class Settings:
                 )
             ),
             qq_enabled=qq_enabled,
+            qq_webui_url=qq_webui_url,
+            qq_webui_token=get("QQ_WEBUI_TOKEN") or None,
+            qq_webui_config_path=(
+                _project_path(get("QQ_WEBUI_CONFIG_PATH"))
+                if get("QQ_WEBUI_CONFIG_PATH")
+                else None
+            ),
             qq_ws_url=qq_ws_url,
             qq_ws_token=get("QQ_WS_TOKEN") or None,
             qq_primary_contact_id=get("QQ_PRIMARY_CONTACT_ID") or None,
@@ -414,6 +440,10 @@ class Settings:
             qq_training_group_ids=training_group_ids,
             qq_reply_group_ids=reply_group_ids,
             qq_dry_run=qq_dry_run,
+            qq_auto_reply_enabled=_parse_bool(
+                "QQ_AUTO_REPLY_ENABLED",
+                get("QQ_AUTO_REPLY_ENABLED", "true"),
+            ),
             qq_proactive_enabled=_parse_bool(
                 "QQ_PROACTIVE_ENABLED",
                 get("QQ_PROACTIVE_ENABLED", "false"),
@@ -483,5 +513,13 @@ class Settings:
             style_context_max_messages=style_max,
             style_export_path=_project_path(
                 get("STYLE_EXPORT_PATH", "data/style_samples.jsonl")
+            ),
+            desktop_auto_show_media=_parse_bool(
+                "DESKTOP_AUTO_SHOW_MEDIA",
+                get("DESKTOP_AUTO_SHOW_MEDIA", "false"),
+            ),
+            desktop_history_message_limit=_parse_int(
+                "DESKTOP_HISTORY_MESSAGE_LIMIT",
+                get("DESKTOP_HISTORY_MESSAGE_LIMIT", "50"),
             ),
         )

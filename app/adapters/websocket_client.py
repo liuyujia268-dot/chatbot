@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import ssl
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -26,19 +26,27 @@ class OneBotWebSocketEvents:
         token: str | None = None,
         *,
         reconnect_seconds: float = 3.0,
+        status_callback: Callable[[str, str | None], None] | None = None,
     ) -> None:
         self.url = url
         self.token = token
         self.reconnect_seconds = reconnect_seconds
+        self._status_callback = status_callback
         self._writer: asyncio.StreamWriter | None = None
         self._send_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
+    @property
+    def connected(self) -> bool:
+        return self._writer is not None
+
     async def __aiter__(self) -> AsyncIterator[dict]:
         while True:
             try:
+                self._notify_status("connecting")
                 reader, writer = await self._connect()
                 self._writer = writer
+                self._notify_status("connected")
                 try:
                     async for text in self._messages(reader, writer):
                         event = json.loads(text)
@@ -52,6 +60,7 @@ class OneBotWebSocketEvents:
                 finally:
                     if self._writer is writer:
                         self._writer = None
+                    self._notify_status("disconnected")
                     self._fail_pending(
                         ConnectionError("NapCat WebSocket disconnected")
                     )
@@ -59,9 +68,18 @@ class OneBotWebSocketEvents:
                     await writer.wait_closed()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self._notify_status("error", str(exc))
                 logger.exception("onebot_websocket_disconnected url=%s", self.url)
                 await asyncio.sleep(self.reconnect_seconds)
+
+    def _notify_status(self, status: str, detail: str | None = None) -> None:
+        if self._status_callback is None:
+            return
+        try:
+            self._status_callback(status, detail)
+        except Exception:
+            logger.exception("onebot_status_callback_failed status=%s", status)
 
     def _fail_pending(self, error: Exception) -> None:
         pending, self._pending = self._pending, {}
@@ -75,7 +93,7 @@ class OneBotWebSocketEvents:
         params: dict[str, Any],
         *,
         timeout_seconds: float = 10.0,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | list[Any]:
         writer = self._writer
         if writer is None:
             raise ConnectionError("NapCat WebSocket is not connected")
@@ -103,7 +121,7 @@ class OneBotWebSocketEvents:
                 f"NapCat action failed retcode={response.get('retcode')}"
             )
         data = response.get("data")
-        return data if isinstance(data, dict) else {}
+        return data if isinstance(data, (dict, list)) else {}
 
     async def _connect(
         self,

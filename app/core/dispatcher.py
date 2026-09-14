@@ -203,6 +203,11 @@ class MessageDispatcher:
     def is_human_takeover(self, session_id: str) -> bool:
         return self._sessions.is_human_takeover(session_id)
 
+    def interrupt_current_reply(self, session_id: str) -> int:
+        """Invalidate in-flight work without enabling persistent takeover."""
+        self._ensure_session_loaded(session_id)
+        return self._advance_conversation(session_id)
+
     async def finish_background_tasks(self) -> None:
         if self._maintenance is not None:
             await self._maintenance.drain()
@@ -241,7 +246,7 @@ class MessageDispatcher:
         self,
         message: PlatformMessage,
     ) -> bool:
-        """Record a real operator message and hand that conversation to them."""
+        """Record an operator message and invalidate only the current reply."""
         if not message.is_self:
             raise ValueError("human self message must have is_self=true")
         session = self._ensure_session_loaded(message.conversation_id)
@@ -251,7 +256,6 @@ class MessageDispatcher:
         session.add_message(outgoing.role, outgoing.content)
         self._memory.append(message.conversation_id, outgoing)
         self._advance_conversation(message.conversation_id)
-        self._sessions.set_human_takeover(message.conversation_id, True)
         return True
 
     def _cache_current_image_descriptions(
@@ -436,8 +440,14 @@ class ContinuousMessageMerger:
     def record_human_self_platform(self, message: PlatformMessage) -> bool:
         return self._dispatcher.receive_human_self_platform_message(message)
 
+    def interrupt_current_reply(self, session_id: str) -> int:
+        return self._dispatcher.interrupt_current_reply(session_id)
+
     def is_human_takeover(self, session_id: str) -> bool:
         return self._dispatcher.is_human_takeover(session_id)
+
+    def set_human_takeover(self, session_id: str, enabled: bool) -> None:
+        self._dispatcher.set_human_takeover(session_id, enabled)
 
     async def _enqueue(
         self,

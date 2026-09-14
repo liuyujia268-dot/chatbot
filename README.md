@@ -23,13 +23,47 @@ py -3.12 -m venv .venv
 
 ## 一键运行
 
-直接双击项目根目录的 `run.cmd`。脚本会自动进入项目目录并优先使用 `.venv` 中的 Python。
+直接双击项目根目录已有的快捷方式，或运行 `run.cmd`。现在默认打开桌面界面，
+脚本会自动进入项目目录并优先使用 `.venv` 中的 `pythonw.exe`，不会保留
+命令行窗口。
 
 也可以在 CMD 中运行：
 
 ```bat
 run.cmd
 ```
+
+需要排查日志或继续使用旧控制台时运行：
+
+```bat
+run-console.cmd
+```
+
+## 桌面界面
+
+首页可以选择 QQ 或微信；微信入口当前只提示“尚未实现”。选择 QQ 后会打开配置的
+NapCat WebUI，并在 OneBot WebSocket 返回有效登录账号前保持“QQ 登录中”状态。
+未登录时，自动回复、主动聊天、追加回复和 Dry Run 开关均不可用，设置按钮始终
+可用。
+
+登录后左侧按“联系人”和“群聊”两个固定分组展示好友与群。每个分组的新项目只会
+追加到末尾，收到新消息不会改变顺序；拖动每行最右侧的“☰”可以调整顺序，
+点击左侧内容只选择会话，也可以将会话置顶。排序、
+置顶状态和未读数保存在当前 SQLite 数据库的桌面投影表中。未读数包含对方消息和
+模型生成的回复，打开会话后清零。
+
+右侧会话区支持人工发送文本。图片和 QQ 表情默认只显示可点击的代号；图片仍会按
+原消息结构进入视觉模型，不受桌面折叠设置影响。标准库 Tk 能识别的图片格式会在
+点击后内嵌显示，其他格式提供浏览器查看入口。可以在设置中开启默认展开。
+标题栏右侧的 `<` / `>` 用于切换当前分组内的上一或下一会话，
+`<<` / `>>` 用于切换上一或下一分组；到达边界时对应按钮自动禁用。
+首次打开一个会话时，桌面端会通过 NapCat 只读同步最近一批历史消息。历史只写入
+桌面显示表，不会重新进入 Dispatcher、触发模型回复、长期记忆或风格训练。
+快速切换时，较晚返回的其他联系人历史不会覆盖当前会话。
+
+设置页可以修改 Provider、Base URL、模型名、超时、Temperature、最大 Tokens、
+上下文条数、最大字符数和 debounce 等参数。已保存的 API Key 只显示掩码；保存
+其他设置不会覆盖原 Key。模型和连接参数需要重新连接或重启后生效。
 
 ## 配置文件
 
@@ -118,6 +152,9 @@ MODEL_NAME=<用户自行填写>
 | `MEMORY_DEBUG` | `false` | 是否显示本次模型实际使用的上下文 |
 | `MEMORY_PROMPT_PATH` | `app/prompts/memory_maintenance.txt` | 摘要与候选提取 Prompt |
 | `QQ_ENABLED` | `false` | 是否启动 NapCat OneBot WebSocket 事件接收 |
+| `QQ_WEBUI_URL` | `http://127.0.0.1:6099/webui/` | 桌面端点击 QQ 时打开的 NapCat WebUI |
+| `QQ_WEBUI_TOKEN` | 空 | NapCat WebUI 登录 Token；与 OneBot Token 分开且不会写入日志 |
+| `QQ_WEBUI_CONFIG_PATH` | 空 | 可选的 `webui.json` 完整路径；留空时自动查找常见 NapCat 安装位置 |
 | `QQ_WS_URL` | `ws://127.0.0.1:3001` | NapCat 正向 WebSocket Server 地址 |
 | `QQ_WS_TOKEN` | 空 | NapCat WebSocket Token；日志不输出正文 |
 | `QQ_PRIMARY_CONTACT_ID` | 空 | 主联系人的真实 QQ user_id，不按昵称自动绑定 |
@@ -127,6 +164,7 @@ MODEL_NAME=<用户自行填写>
 | `QQ_TRAINING_GROUP_IDS` | 空 | 逗号分隔的只读训练群号 |
 | `QQ_REPLY_GROUP_IDS` | 空 | 群回复白名单；仅被 @ 时回复，也参与随机主动消息 |
 | `QQ_DRY_RUN` | `true` | `false` 时通过 OneBot 动作真实发送 |
+| `QQ_AUTO_REPLY_ENABLED` | `true` | 桌面端启动时的自动回复总开关 |
 | `QQ_PROACTIVE_ENABLED` | `false` | 是否允许受控的主动消息 |
 | `QQ_PROACTIVE_CONTACT_IDS` | 空 | 主动私聊白名单；空时使用最近活跃的私聊联系人 |
 | `QQ_PROACTIVE_EXCLUDE_CONTACT_IDS` | 空 | 永不主动联系的 QQ 号 |
@@ -149,6 +187,8 @@ MODEL_NAME=<用户自行填写>
 | `STYLE_CONTEXT_MIN_MESSAGES` | `3` | 生成风格候选所需的最少前文数 |
 | `STYLE_CONTEXT_MAX_MESSAGES` | `10` | 风格候选最多保留的前文数 |
 | `STYLE_EXPORT_PATH` | `data/style_samples.jsonl` | 已接受样本的脱敏 JSONL 输出位置 |
+| `DESKTOP_AUTO_SHOW_MEDIA` | `false` | 桌面会话中是否默认展开图片和表情 |
+| `DESKTOP_HISTORY_MESSAGE_LIMIT` | `50` | 首次打开会话时从 NapCat 同步的最近历史条数 |
 
 旧名称 `MODEL_HISTORY_LIMIT`、`MODEL_MAX_OUTPUT_TOKENS` 和
 `CHATBOT_MERGE_WINDOW` 仍兼容，但建议新配置统一使用表中的名称。
@@ -203,6 +243,25 @@ system prompt 不计入该数量。内存会话使用同一上限，不会无限
 
 ## NapCat QQ 收发接入
 
+桌面端选择 QQ 时会按以下顺序取得 WebUI 登录 Token：
+`QQ_WEBUI_TOKEN`、`QQ_WEBUI_URL` 中已有的 `token` 查询参数、本机
+NapCat `config\webui.json`。自动读取到的 Token 只在打开浏览器时使用，
+不会复制到 `.env`、状态栏或日志。`QQ_WEBUI_TOKEN` 与
+`QQ_WS_TOKEN` 是两个独立配置；自动查找失败时可在“设置 → QQ 与界面”
+填写 Token 或 `webui.json` 完整路径。
+
+若本地 WebUI 尚未启动，桌面端会从同一 NapCat 安装目录定位
+`launcher-user.bat`，先启动 NapCat 并等待 6099 端口就绪，再使用上述
+Token 直接进入 WebUI 登录路由并刷新认证凭据。这样不会把浏览器缓存中的
+“未知用户”状态误判为当前已登录的 NapCat。
+
+登录失败、关闭了登录页或需要换号时，可在桌面端顶部点击“重新登录”，无需
+重启 Chatbot。项目不写死当前 QQ 账号，会以 OneBot 的
+`get_login_info.user_id` 和事件 `self_id` 为准；一次运行连接一个账号。
+NapCat 的 OneBot 网络配置按 QQ 账号分别保存，因此换号后必须在 WebUI 中为
+新账号单独启用与 `QQ_WS_URL` 一致的正向 WebSocket Server。程序不会擅自
+复制另一个账号的 Token 或修改 NapCat 配置。
+
 先在 NapCat WebUI 中人工启用 OneBot 正向 WebSocket Server，并记录地址和
 Token。若需要采集当前 QQ 账号本人手动发送的消息，还需人工开启该连接的
 `reportSelfMessage`。程序不会修改 NapCat 配置。
@@ -239,6 +298,9 @@ QQ_FOLLOWUP_MAX_DELAY_SECONDS=7
 
 所有非本人私聊都复用现有 Dispatcher 并生成回复；`QQ_DRY_RUN=false`
 时会通过 NapCat 真实发送。昵称只用于显示，主联系人身份仍按 user_id 识别。
+手机或桌面端的人工消息会使当前正在生成、等待追加或尚处于 debounce 的回复
+立即过期，但不会永久关闭该会话的自动回复；下一条联系人消息仍默认自动回复。
+需要连续人工接管时，在桌面端选中会话并勾选顶部“人工接管”，取消勾选后恢复。
 训练群只保存本地原始事件和样本候选，不进入私聊历史、记忆或聊天模型。
 只有 `QQ_REPLY_GROUP_IDS` 中的群允许回复，且仅在消息明确 @ 当前账号时回复；
 配置层禁止回复群与训练群重叠。回复群的普通消息只保存为该群的上下文。
@@ -251,6 +313,9 @@ QQ_FOLLOWUP_MAX_DELAY_SECONDS=7
 
 管理员发送 `#指令 [详细语句]` 时，该语句会作为管理员私聊会话的长期记忆
 保存并保留原始消息来源；非管理员发送相同格式只会作为普通聊天文本。
+管理员权限只比较 OneBot 事件中的真实 `sender_id` 是否位于
+`QQ_ADMIN_CONTACT_IDS`；昵称、备注和 `QQ_PRIMARY_CONTACT_NAME` 均不参与
+管理员身份判断。
 主动消息按配置的随机区间安排，并限制每名联系人每日条数。生成期间若收到
 该联系人的新消息，旧主动回复会被版本机制取消和丢弃。
 
