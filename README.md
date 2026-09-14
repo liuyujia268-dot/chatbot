@@ -4,8 +4,14 @@
 `MockModel`、OpenAI-compatible 文本/视觉模型，以及 NapCat OneBot
 WebSocket 的 QQ 收发接入。QQ 可显式切换 Dry Run 或真实发送，微信尚未接入。
 
+准备参与开发时，请同时阅读 [协作开发指南](CONTRIBUTING.md)；README 负责运行与
+配置，协作指南负责模块边界、测试约定和提交检查，未来方向记录在
+[后续规划](qq新项目.md)。
+
 ## 环境要求
 
+- Windows（主要开发和实际运行环境）
+- Windows CMD；文档命令不依赖 PowerShell、Bash 或 WSL
 - Python 3.12+
 - pytest（仅测试需要）
 
@@ -14,12 +20,20 @@ NapCat WebSocket 接收使用 Python 标准库，不增加新的依赖。
 
 ## 首次初始化（CMD）
 
-打开 CMD，进入项目目录后执行：
+从远程仓库首次获取项目时，在 CMD 中执行：
 
 ```bat
+git clone https://gitee.com/sun-ji-kun/chat-bot.git
+cd /d chat-bot
 py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[test]"
+copy .env.example .env
+.venv\Scripts\python.exe -m pytest -q
 ```
+
+已经克隆仓库时，从创建虚拟环境这一步开始即可。`.env`、SQLite 数据库、日志、
+聊天回放结果和风格样本都是本机数据，不应提交或直接发给协作者。共享新增配置时
+只更新不含真实账号、Token 和 API Key 的 `.env.example`。
 
 ## 一键运行
 
@@ -278,7 +292,7 @@ QQ_ADMIN_CONTACT_IDS=<管理员 QQ号>
 QQ_ADMIN_MEMORY_PREFIX=#指令
 QQ_TRAINING_GROUP_IDS=<群号1>,<群号2>
 QQ_REPLY_GROUP_IDS=
-QQ_DRY_RUN=false
+QQ_DRY_RUN=true
 
 QQ_PROACTIVE_ENABLED=true
 QQ_PROACTIVE_CONTACT_IDS=
@@ -295,6 +309,9 @@ QQ_FOLLOWUP_PROBABILITY=0.15
 QQ_FOLLOWUP_MIN_DELAY_SECONDS=2
 QQ_FOLLOWUP_MAX_DELAY_SECONDS=7
 ```
+
+上面保留安全的 Dry Run。确认入站事件、账号 ID、群范围和候选回复都正确后，只有
+明确准备真实发送时才将 `QQ_DRY_RUN` 改为 `false`。
 
 所有非本人私聊都复用现有 Dispatcher 并生成回复；`QQ_DRY_RUN=false`
 时会通过 NapCat 真实发送。昵称只用于显示，主联系人身份仍按 user_id 识别。
@@ -353,7 +370,9 @@ OneBot Event
 `current_account_profile.private_information` 可以保存在 SQLite，但不会进入
 聊天模型、记忆维护模型或摘要模型的任何请求；`/account show` 与 Debug 也不
 显示正文。本人消息通过 OneBot 的 `self_id` 和发送者 ID 识别，保存为
-`human_self`、开启相应会话人工接管，并禁止再次触发模型，避免消息循环。
+`human_self`，并使该会话当前处于 debounce、生成或等待追加的回复失效；它不会
+自动开启持续人工接管，下一条入站消息仍默认自动回复。该本人消息自身禁止再次
+触发模型，避免消息循环。
 
 `QQ_DRY_RUN=true` 是模板默认值；只有显式设为 `false` 才会调用 OneBot
 发送动作。训练群无论该开关为何值都不会自动发送。
@@ -446,6 +465,16 @@ Mock 模式不会自动执行需要结构化 JSON 的后台记忆提取；聊天
 
 pytest 中的模型测试全部使用 MockModel 或 Fake Client，不会连接真实模型或
 任何收费 API。
+
+准备提交时同时执行格式和空白检查：
+
+```bat
+git diff --check
+.venv\Scripts\python.exe -m pytest -q
+```
+
+新增配置、数据库结构、平台消息字段或发送行为时需要同步修改的文件清单，见
+[协作开发指南](CONTRIBUTING.md)。
 
 ### 手动聊天回放
 
