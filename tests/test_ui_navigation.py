@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from app.config import Settings
+import app.ui.desktop as desktop_module
 from app.ui.desktop import DesktopApp
 
 
@@ -120,3 +122,54 @@ def test_group_navigation_selects_first_conversation_in_target_group() -> None:
     DesktopApp._navigate_group(app, 1)
 
     assert selected == ["qq:group:1"]
+
+
+def test_reconnect_replaces_running_runtime(monkeypatch) -> None:
+    class FakeRuntime:
+        instances: list["FakeRuntime"] = []
+
+        def __init__(self, settings) -> None:
+            self.settings = settings
+            self.started = False
+            self.stopped = False
+            self.instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr(desktop_module, "DesktopRuntime", FakeRuntime)
+    previous = FakeRuntime(Settings())
+    controls: list[bool] = []
+    app = SimpleNamespace(
+        runtime=previous,
+        settings=Settings(),
+        _account_id="10001",
+        _login_name="当前账号",
+        _current=object(),
+        _items={"qq:private:20002": object()},
+        _history_loaded={("10001", "qq:private:20002")},
+        _history_inflight={("10001", "qq:private:20002")},
+        _takeover_conversations={("10001", "qq:private:20002")},
+        _photo_refs={"avatar:qq:private:20002": object()},
+        _avatar_attempted={"qq:private:20002"},
+        _set_connected_controls=controls.append,
+        _save_draft=lambda: None,
+        _save_reading_position=lambda: None,
+    )
+
+    DesktopApp._replace_qq_runtime(app)
+
+    assert app._takeover_conversations == set()
+    assert app._photo_refs == {}
+    assert app._avatar_attempted == set()
+
+    assert previous.stopped is True
+    assert app.runtime is not previous
+    assert app.runtime.started is True
+    assert app._account_id == ""
+    assert app._current is None
+    assert app._items == {}
+    assert controls == [False]

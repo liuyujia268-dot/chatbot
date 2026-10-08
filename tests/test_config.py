@@ -15,6 +15,11 @@ def test_provider_defaults_to_mock_without_external_configuration(tmp_path: Path
 
     assert settings.model_provider == "mock"
     assert settings.qq_image_history_limit == 1
+    assert settings.qq_proactive_min_seconds == 1800
+    assert settings.qq_proactive_max_seconds == 3600
+    assert settings.qq_proactive_daily_limit == 0
+    assert settings.qq_proactive_quiet_start == "23:59"
+    assert settings.qq_proactive_quiet_end == "07:00"
     assert isinstance(build_model(settings), MockModel)
 
 
@@ -175,6 +180,7 @@ def test_qq_and_image_configuration_is_loaded(tmp_path: Path) -> None:
             "QQ_PRIMARY_CONTACT_ID": "20002",
             "QQ_ADMIN_CONTACT_IDS": "20002, 20003",
             "QQ_ADMIN_MEMORY_PREFIX": "#指令",
+            "QQ_ADMIN_CONFIG_PREFIX": "#配置",
             "QQ_TRAINING_GROUP_IDS": "90001, 90002",
             "QQ_REPLY_GROUP_IDS": "80001, 80002",
             "QQ_DRY_RUN": "true",
@@ -206,6 +212,7 @@ def test_qq_and_image_configuration_is_loaded(tmp_path: Path) -> None:
     assert settings.qq_primary_contact_id == "20002"
     assert settings.qq_admin_contact_ids == ("20002", "20003")
     assert settings.qq_admin_memory_prefix == "#指令"
+    assert settings.qq_admin_config_prefix == "#配置"
     assert settings.qq_training_group_ids == ("90001", "90002")
     assert settings.qq_reply_group_ids == ("80001", "80002")
     assert settings.qq_dry_run is True
@@ -259,6 +266,15 @@ def test_invalid_proactive_range_is_rejected(tmp_path: Path) -> None:
                 "QQ_PROACTIVE_MAX_SECONDS": "90",
             },
         )
+
+
+def test_zero_proactive_daily_limit_means_unlimited(tmp_path: Path) -> None:
+    settings = Settings.from_env(
+        env_file=tmp_path / ".env",
+        environ={"QQ_PROACTIVE_DAILY_LIMIT": "0"},
+    )
+
+    assert settings.qq_proactive_daily_limit == 0
 
 
 def test_invalid_proactive_quiet_time_is_rejected(tmp_path: Path) -> None:

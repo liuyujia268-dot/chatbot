@@ -15,9 +15,14 @@ from app.adapters.outbound import (
     ConsoleMessageSender,
     DryRunMessageSender,
     MessageSender,
+    split_outbound_text,
 )
 from app.core.dispatcher import ContinuousMessageMerger, DispatchResult, MessageDispatcher
 from app.core.platform import OutboundMessage, PlatformMessage
+from app.core.identity import platform_conversation_id
+from app.core.identity import conversation_key
+from app.adapters.delivery import DeliveryService, STATUS_LABELS
+from collections.abc import Callable
 from app.models.base import ModelError
 
 
@@ -57,6 +62,7 @@ class ConsoleAdapter(PlatformAdapter):
         qq_dry_run: bool = True,
         qq_primary_contact_id: str | None = None,
         qq_primary_contact_name: str = "宇飞",
+        qq_account_provider: Callable[[], str | None] | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._merger = merger
@@ -73,6 +79,11 @@ class ConsoleAdapter(PlatformAdapter):
         self._qq_dry_run = qq_dry_run
         self._qq_primary_id = qq_primary_contact_id
         self._qq_primary_name = qq_primary_contact_name
+        self.qq_account_provider = qq_account_provider
+        self._delivery = (DeliveryService(dispatcher.database, on_history=merger.accept_delivered_history)
+                          if dispatcher is not None and merger is not None else None)
+        if self._admin_commands is not None:
+            self._admin_commands.account_provider = (lambda: f'qq:{self.qq_account_provider()}' if self.qq_account_provider and self.qq_account_provider() else None) if qq_mode else lambda: 'console:local'
         if qq_mode and qq_sender is None:
             raise ValueError("QQ console mode requires a QQ sender")
 
@@ -122,6 +133,13 @@ class ConsoleAdapter(PlatformAdapter):
                         if self._qq_mode
                         else contact
                     )
+                    if self._qq_mode:
+                        account_id = self.qq_account_provider() if self.qq_account_provider else None
+                        if not account_id:
+                            raise ValueError('QQ账号尚未确认')
+                        conversation_id = conversation_key('qq', account_id, conversation_id)
+                    else:
+                        conversation_id = conversation_key('console', 'local', conversation_id)
                 except ValueError as exc:
                     print(f"[系统] {exc}")
                     continue
@@ -167,16 +185,31 @@ class ConsoleAdapter(PlatformAdapter):
         except ValueError as exc:
             print(f"[系统] {exc}")
             return None
+        account_id = self.qq_account_provider() if self.qq_account_provider else None
+        if not account_id:
+            print('[QQ 手动发送失败] QQ账号尚未确认；正文未提交')
+            return None
         message = OutboundMessage(
             platform="qq",
-            account_id="console-manual",
+            account_id=account_id,
             conversation_id=conversation_id,
             text=content,
             metadata={"source_type": "human_self"},
         )
         try:
             assert self._qq_sender is not None
-            await self._qq_sender.send(message)
+            if self._delivery is not None:
+                self._merger.interrupt_current_reply(message.session_id)
+                record_id = self._delivery.prepare(message)
+                record = await self._delivery.send(record_id, self._qq_sender, guard=lambda outbound: (
+                    self.qq_account_provider is not None and self.qq_account_provider() == outbound.account_id))
+                print(f"[QQ MANUAL] {STATUS_LABELS[record['status']]} record={record_id}")
+                if record['status'] not in {'sent', 'simulated'}:
+                    print('[QQ MANUAL] 正文已保留在发送记录中，可复制后核对重试')
+                    return None
+            else:
+                # Lightweight adapters in unit tests may not own a dispatcher.
+                await self._qq_sender.send(message)
         except Exception:
             logger.exception(
                 "qq_manual_send_failed conversation=%s",
@@ -244,12 +277,21 @@ class ConsoleAdapter(PlatformAdapter):
                     "已记录消息但不自动回复"
                 )
             return
-        await self._sender.send(
-            OutboundMessage(
-                platform="console",
-                account_id="local",
-                conversation_id=result.session_id,
-                text=result.reply,
-                metadata={"message_count": result.message_count},
-            )
+        outbound = OutboundMessage(
+            platform="console",
+            account_id="local",
+            conversation_id=platform_conversation_id(result.session_id),
+            text=result.reply,
+            metadata={"message_count": result.message_count},
         )
+        for index, text in enumerate(split_outbound_text(result.reply)):
+            metadata = outbound.metadata if index == 0 else {}
+            await self._sender.send(
+                OutboundMessage(
+                    platform=outbound.platform,
+                    account_id=outbound.account_id,
+                    conversation_id=outbound.conversation_id,
+                    text=text,
+                    metadata=metadata,
+                )
+            )

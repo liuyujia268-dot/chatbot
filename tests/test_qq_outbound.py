@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from app.adapters.outbound import NapCatMessageSender
@@ -61,5 +62,29 @@ def test_napcat_sender_uses_group_action() -> None:
         action, params = client.calls[0]
         assert action == "send_group_msg"
         assert params["group_id"] == "80001"
+
+    asyncio.run(scenario())
+
+
+def test_napcat_sender_appends_local_image_after_text(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        image = tmp_path / "profile.jpg"
+        image.write_bytes(b"test-image")
+        client = FakeOneBotClient()
+        sender = NapCatMessageSender(client)
+
+        await sender.send(
+            OutboundMessage(
+                platform="qq",
+                account_id="10001",
+                conversation_id="qq:private:20002",
+                text="给你看看",
+                metadata={"local_image_paths": (str(image),)},
+            )
+        )
+
+        payload = client.calls[0][1]["message"]
+        assert [part["type"] for part in payload] == ["text", "image"]
+        assert payload[1]["data"]["file"] == image.resolve().as_uri()
 
     asyncio.run(scenario())

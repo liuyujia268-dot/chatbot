@@ -12,8 +12,9 @@ from app.adapters.image_resolver import ImageResolver
 from app.adapters.outbound import DryRunMessageSender, NapCatMessageSender
 from app.adapters.qq import QQAdapter
 from app.adapters.websocket_client import OneBotWebSocketEvents
-from app.config import ConfigurationError, Settings
+from app.config import ConfigurationError, PROJECT_ROOT, Settings
 from app.runtime import build_core_runtime
+from app.ui.settings_store import update_env_file
 
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,13 @@ async def async_main() -> None:
         primary_contact_name=settings.qq_primary_contact_name,
         admin_contact_ids=settings.qq_admin_contact_ids,
         admin_memory_prefix=settings.qq_admin_memory_prefix,
+        admin_config_prefix=settings.qq_admin_config_prefix,
+        admin_config_writer=lambda updates: update_env_file(
+            PROJECT_ROOT / ".env",
+            updates,
+        ),
         memory_service=core.memory_service,
+        profile_asset_root=PROJECT_ROOT,
         training_group_ids=settings.qq_training_group_ids,
         reply_group_ids=settings.qq_reply_group_ids,
         dry_run=settings.qq_dry_run,
@@ -125,7 +132,21 @@ async def async_main() -> None:
         event_source=onebot,
         sender=sender,
         ai_generated_message_ids=ai_generated_ids,
+        image_wait_seconds=settings.qq_image_timeout_seconds,
     )
+    console.qq_account_provider = lambda: qq.account_id
+    async def confirm_login():
+        try:
+            info = await onebot.call_action('get_login_info', {})
+            account_id = str(info.get('user_id', '')).strip()
+            if account_id:
+                qq.activate_account(account_id)
+        except Exception:
+            logger.warning('qq_account_confirmation_failed')
+    def status_callback(status, detail):
+        if status == 'connected':
+            asyncio.create_task(confirm_login())
+    onebot._status_callback = status_callback
     qq_task = asyncio.create_task(qq.run())
     try:
         await console.run()

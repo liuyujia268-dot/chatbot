@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS current_account_profile (
     public_name TEXT,
     background TEXT,
     public_information TEXT,
+    public_image_path TEXT,
     private_information TEXT,
     provenance_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -180,5 +181,50 @@ CREATE TABLE IF NOT EXISTS memory_processing_state (
     last_processed_message_id INTEGER NOT NULL DEFAULT 0,
     last_attempt_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS account_profiles (
+    account_key TEXT PRIMARY KEY,
+    public_name TEXT,
+    background TEXT,
+    public_information TEXT,
+    public_image_path TEXT,
+    private_information TEXT,
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS conversation_controls (
+    session_id TEXT PRIMARY KEY,
+    human_takeover INTEGER NOT NULL DEFAULT 0 CHECK (human_takeover IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS outbound_deliveries (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    segment_index INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'candidate',
+    platform_message_id TEXT,
+    history_message_id INTEGER REFERENCES messages(id),
+    error_code TEXT,
+    error_text TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(batch_id, segment_index)
+);
+
+CREATE TABLE IF NOT EXISTS legacy_assignment (
+    table_name TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    original_conversation_id TEXT,
+    status TEXT NOT NULL,
+    assigned_session_id TEXT,
+    PRIMARY KEY (table_name, record_id)
 );
 """

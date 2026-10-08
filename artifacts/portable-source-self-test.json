@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "python": "3.12.10",
+  "checks": [
+    "portable_resource_root",
+    "all_five_prompts",
+    "bundled_image_asset",
+    "sqlite_and_mock_chat",
+    "persistent_dedup",
+    "separate_contacts",
+    "dry_run_no_transport",
+    "editable_configuration",
+    "tk_home_qq_and_settings_widgets"
+  ]
+}

@@ -10,6 +10,8 @@ import threading
 import tkinter as tk
 import urllib.request
 import webbrowser
+from datetime import UTC, datetime
+from uuid import uuid4
 from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
@@ -27,8 +29,13 @@ from app.ui.napcat_webui import (
     webui_is_ready,
 )
 from app.ui.repository import ConversationItem, DesktopMessage, DesktopRepository
-from app.ui.runtime import DesktopRuntime, UiEvent
+from app.ui.runtime import DesktopRuntime, UiEvent, RuntimeControls
+from app.ui.napcat_connection import NapCatSwitchError, restart_existing_napcat_for_switch
 from app.ui.settings_dialog import SettingsDialog
+from app.adapters.delivery import STATUS_LABELS
+from app.ui.chat_state import ReadingPosition, near_bottom, has_new_tail
+from app.core.identity_resolver import ConversationIdentityResolver
+from app.ui.qq_shutdown import shutdown_qq_session, QQShutdownError
 
 
 logger = logging.getLogger(__name__)
@@ -99,11 +106,28 @@ class DesktopApp:
         }
         self._media_results: queue.Queue[tuple[Any, ...]] = queue.Queue()
         self._toolbar_widgets: list[tk.Widget] = []
-        self._takeover_conversations: set[str] = set()
+        self._takeover_conversations: set[tuple[str, str]] = set()
         self._history_loaded: set[tuple[str, str]] = set()
         self._history_inflight: set[tuple[str, str]] = set()
         self._webui_starting = False
         self._webui_opened = False
+        self._webui_cancel = threading.Event()
+        self._webui_launcher_lock = threading.Lock()
+        self._napcat_launcher_process = None
+        self._webui_config_cache = None
+        self._qq_exiting = False
+        self._qq_paused = False
+        self._qq_switch_after_exit = False
+        self._switch_from_account = None
+        self._scroll_states: dict[tuple[str, str], ReadingPosition] = {}
+        self._rendered_key = None
+        self._rendered_ids = ()
+        self._message_rows = {}
+        self._view_revision = 0
+        self._force_follow_key = None
+        self._ws_state = '未连接'
+        self._connection_notice = ''
+        self._model_state = '待验证（尚未请求）'
         self._main = ttk.Frame(root)
         self._main.pack(fill="both", expand=True)
         self._show_home()
@@ -137,6 +161,10 @@ class DesktopApp:
             child.destroy()
 
     def _show_home(self) -> None:
+        self._save_draft()
+        self._save_reading_position()
+        self._rendered_key = None
+        self._view_revision = getattr(self, '_view_revision', 0) + 1
         self._clear()
         header = ttk.Frame(self._main, padding=(28, 22))
         header.pack(fill="x")
@@ -168,6 +196,8 @@ class DesktopApp:
         messagebox.showinfo("微信", "微信接入尚未实现。", parent=self.root)
 
     def _open_qq(self) -> None:
+        if self._qq_exiting:
+            return
         if self._configuration_error:
             messagebox.showwarning(
                 "配置尚未完成",
@@ -177,10 +207,12 @@ class DesktopApp:
             self._open_settings()
             return
         should_start = self.runtime is None or not self.runtime.running
+        if should_start:
+            self._account_id = ""
+            self._login_name = ""
         self._show_qq()
         if should_start:
-            self.runtime = DesktopRuntime(self.settings)
-            self.runtime.start()
+            self._replace_qq_runtime()
         if should_launch_webui(
             starting=self._webui_starting,
             opened=self._webui_opened,
@@ -189,55 +221,137 @@ class DesktopApp:
             self._begin_webui_launch()
 
     def _retry_qq_login(self) -> None:
+        if self._qq_exiting:
+            return
+        self._replace_qq_runtime()
         if self._webui_starting:
             messagebox.showinfo(
                 "NapCat WebUI",
-                "NapCat 正在启动，请稍候。",
+                "QQ 连接已重建；NapCat WebUI 仍在启动，请稍候。",
                 parent=self.root,
             )
             return
         self._webui_opened = False
         self._begin_webui_launch()
 
-    def _begin_webui_launch(self) -> None:
-        launch = resolve_webui_launch(
-            self.settings.qq_webui_url,
-            explicit_token=self.settings.qq_webui_token,
-            explicit_config_path=self.settings.qq_webui_config_path,
-        )
+    def _replace_qq_runtime(self, *, avoid_account_id: str | None = None) -> None:
+        if getattr(self, '_qq_exiting', False):
+            return
+        self._qq_paused = False
+        self._connection_notice = ''
+        self._ws_state = '连接中'
+        self._save_draft()
+        self._save_reading_position()
+        previous = self.runtime
+        controls = getattr(previous, "controls", RuntimeControls.from_settings(self.settings))
+        if previous is not None:
+            previous.stop()
+        self._account_id = ""
+        self._login_name = ""
+        self._current = None
+        self._items.clear()
+        self._history_loaded.clear()
+        self._history_inflight.clear()
+        self._takeover_conversations.clear()
+        self._photo_refs = {key: value for key, value in self._photo_refs.items() if not key.startswith(('avatar:', 'media:'))}
+        self._avatar_attempted.clear()
+        self._rendered_key = None
+        self._view_revision = getattr(self, '_view_revision', 0) + 1
+        self._model_state = '待验证（重连后尚未请求）'
+        if hasattr(self, '_input') and self._input.winfo_exists():
+            self._input.delete('1.0', 'end')
+        if hasattr(self, '_message_frame') and self._message_frame.winfo_exists():
+            for child in self._message_frame.winfo_children():
+                child.destroy()
+        if hasattr(self, "_status") and self._status.winfo_exists():
+            self._status.configure(
+                text="正在重建 NapCat 连接…",
+                foreground="#b45309",
+            )
+        if hasattr(self, "_set_connected_controls"):
+            self._set_connected_controls(False)
+        self.runtime = DesktopRuntime(self.settings)
+        if hasattr(self.runtime, "restore_controls"):
+            self.runtime.restore_controls(controls)
+        if avoid_account_id:
+            self.runtime.require_account_change(avoid_account_id)
+        self.runtime.start()
+
+    def _begin_webui_launch(self, *, force_start: bool = False) -> None:
+        if self._qq_exiting:
+            return
+        self._webui_cancel.set()
+        cancel_event = self._webui_cancel = threading.Event()
         self._webui_starting = True
+        settings = self.settings
+        config_path = settings.qq_webui_config_path or getattr(self, '_webui_config_cache', None)
+        if hasattr(self, '_status') and self._status.winfo_exists():
+            self._status.configure(text='正在检查 NapCat WebUI…（界面可继续操作）', foreground='#b45309')
+
+        def report(callback, *args):
+            if not cancel_event.is_set():
+                self._media_results.put((self._apply_webui_result, cancel_event, callback, *args))
 
         def worker() -> None:
-            if is_local_webui(launch.url) and not webui_is_ready(launch.url):
+            if cancel_event.is_set():
+                return
+            try:
+                local_ready = is_local_webui(settings.qq_webui_url) and webui_is_ready(settings.qq_webui_url)
+                launch = resolve_webui_launch(
+                    settings.qq_webui_url,
+                    explicit_token=settings.qq_webui_token,
+                    explicit_config_path=config_path,
+                    discover_config=not local_ready,
+                )
+            except Exception as exc:
+                logger.warning('napcat_webui_resolve_failed error_type=%s', type(exc).__name__)
+                report(self._webui_launch_failed, 'WebUI 配置检查失败，请检查 WebUI 地址和配置文件路径。')
+                return
+            if cancel_event.is_set():
+                return
+            needs_wait = False
+            if force_start and local_ready:
+                # An externally started NapCat supervisor can survive QQ cleanup.
+                # Reuse its WebUI instead of starting a second copy on a new port.
+                try:
+                    if cancel_event.is_set():
+                        return
+                    restart_existing_napcat_for_switch(launch)
+                    needs_wait = True
+                except NapCatSwitchError as exc:
+                    report(self._webui_launch_failed, str(exc))
+                    return
+            elif is_local_webui(launch.url) and not local_ready:
                 launcher = find_napcat_launcher(launch.config_path)
                 if launcher is None:
-                    self._media_results.put(
-                        (
-                            self._webui_launch_failed,
-                            "没有找到 NapCat 启动脚本，请在设置中填写 webui.json 的完整路径。",
-                        )
-                    )
+                    report(self._webui_launch_failed, "没有找到 NapCat 启动脚本，请在设置中填写 webui.json 的完整路径。")
                     return
                 try:
-                    start_napcat_launcher(launcher)
+                    with self._webui_launcher_lock:
+                        if cancel_event.is_set():
+                            return
+                        self._napcat_launcher_process = start_napcat_launcher(launcher)
                 except OSError as exc:
                     logger.error(
                         "napcat_start_failed error_type=%s",
                         type(exc).__name__,
                     )
-                    self._media_results.put(
-                        (self._webui_launch_failed, "NapCat 启动失败，请检查安装目录。")
-                    )
+                    report(self._webui_launch_failed, "NapCat 启动失败，请检查安装目录。")
                     return
-                if not wait_for_webui(launch.url):
-                    self._media_results.put(
-                        (
-                            self._webui_launch_failed,
-                            "NapCat 启动后 45 秒内 WebUI 仍未就绪，请检查 QQ 登录窗口。",
-                        )
-                    )
+                needs_wait = True
+            if needs_wait:
+                if not wait_for_webui(launch.url, cancel_event=cancel_event):
+                    report(self._webui_launch_failed, "NapCat 启动后 45 秒内 WebUI 仍未就绪，请检查 QQ 登录窗口。")
                     return
-            self._media_results.put((self._open_resolved_webui, launch))
+                # NapCat can rotate a default token during startup. Re-read just
+                # this known file rather than reopening with pre-start credentials.
+                launch = resolve_webui_launch(
+                    settings.qq_webui_url,
+                    explicit_token=settings.qq_webui_token,
+                    explicit_config_path=launch.config_path,
+                    search_roots=(),
+                )
+            report(self._open_resolved_webui, launch)
 
         threading.Thread(
             target=worker,
@@ -245,8 +359,16 @@ class DesktopApp:
             daemon=True,
         ).start()
 
+    def _apply_webui_result(self, cancel_event, callback, *args) -> None:
+        if (cancel_event is not self._webui_cancel or cancel_event.is_set()
+                or self._qq_exiting or self._qq_paused):
+            return
+        callback(*args)
+
     def _open_resolved_webui(self, launch) -> None:
         self._webui_starting = False
+        if launch.config_path is not None:
+            self._webui_config_cache = launch.config_path
         try:
             opened = webbrowser.open(launch.url, new=2)
         except Exception as exc:
@@ -270,16 +392,22 @@ class DesktopApp:
                 ),
                 parent=self.root,
             )
-        self.root.after(15000, self._show_account_connection_hint)
+        cancel_event = self._webui_cancel
+        self.root.after(15000, lambda: self._show_account_connection_hint(cancel_event))
 
     def _webui_launch_failed(self, message: str) -> None:
         self._webui_starting = False
         self._webui_opened = False
         messagebox.showerror("NapCat WebUI", message, parent=self.root)
 
-    def _show_account_connection_hint(self) -> None:
+    def _show_account_connection_hint(self, cancel_event=None) -> None:
+        if (getattr(self, '_qq_paused', False) or getattr(self, '_qq_exiting', False)
+                or (cancel_event is not None and (cancel_event.is_set() or cancel_event is not self._webui_cancel))):
+            return
         if self._account_id:
             return
+        if getattr(self, '_connection_notice', ''):
+            return  # keep the specific auth/missing-service error, not a timer's generic hint
         if hasattr(self, "_status") and self._status.winfo_exists():
             self._status.configure(
                 text="等待 OneBot；换号后需为该账号单独启用 WebSocket",
@@ -297,27 +425,33 @@ class DesktopApp:
         paned.add(right, weight=3)
         self._build_conversation_list(left)
         self._build_chat(right)
-        connected = bool(self._account_id)
+        connected = bool(self._account_id) and bool(getattr(self.runtime, 'connected', True))
         self._set_connected_controls(connected)
         if connected:
             self._status.configure(
-                text=f"已登录：{self._login_name or self._account_id}",
+                text=self._connection_status(),
                 foreground="#15803d",
             )
             self._refresh_conversations()
+
+            if self._current and self._current.conversation_id in self._items:
+                self._select_tree_conversation(self._current.conversation_id)
 
     def _build_toolbar(self) -> None:
         self._toolbar_widgets = []
         bar = ttk.Frame(self._main, padding=(12, 9))
         bar.pack(fill="x")
         ttk.Button(bar, text="首页", command=self._show_home).pack(side="left", padx=(0, 10))
-        self._status = ttk.Label(bar, text="QQ 登录中…", foreground="#b45309")
-        self._status.pack(side="left", padx=(0, 18))
+        status_line = ttk.Frame(self._main, padding=(12, 0, 12, 6))
+        status_line.pack(fill='x')
+        self._status = ttk.Label(status_line, text=self._connection_status(), foreground="#b45309", wraplength=1100)
+        self._status.pack(fill='x')
 
-        self._auto_var = tk.BooleanVar(value=self.settings.qq_auto_reply_enabled)
-        self._proactive_var = tk.BooleanVar(value=self.settings.qq_proactive_enabled)
-        self._followup_var = tk.BooleanVar(value=self.settings.qq_followup_enabled)
-        self._dry_var = tk.BooleanVar(value=self.settings.qq_dry_run)
+        controls = getattr(self.runtime, "controls", RuntimeControls.from_settings(self.settings))
+        self._auto_var = tk.BooleanVar(value=controls.auto_reply)
+        self._proactive_var = tk.BooleanVar(value=controls.proactive)
+        self._followup_var = tk.BooleanVar(value=controls.followup)
+        self._dry_var = tk.BooleanVar(value=controls.dry_run)
         switches = (
             ("自动回复", self._auto_var, self._toggle_auto, "关闭后仍保存消息，但不调用聊天模型。"),
             ("主动聊天", self._proactive_var, self._toggle_proactive, "控制随机主动私聊和白名单群主动消息。"),
@@ -347,14 +481,23 @@ class DesktopApp:
         Tooltip(settings_button, "设置始终可用；模型与连接参数重连后生效。")
         retry_button = ttk.Button(
             bar,
-            text="重新登录",
+            text="重新连接",
             command=self._retry_qq_login,
         )
         retry_button.pack(side="right", padx=(0, 10))
         Tooltip(
             retry_button,
-            "重新打开带 Token 的 NapCat 登录页；登录失败或换 QQ 账号时使用。",
+            "重建 QQ Runtime 与 WebSocket，并重新打开 NapCat 登录页。",
         )
+        self._retry_button = retry_button
+        self._qq_exit_button = ttk.Button(bar, text='退出 QQ', command=self._exit_qq,
+                                         state='disabled' if getattr(self, '_qq_exiting', False) else 'normal')
+        self._qq_exit_button.pack(side='right', padx=(0, 10))
+        Tooltip(self._qq_exit_button, '停止聊天和重连，保存草稿，退出本机全部 QQ 账号后台；不删除数据。')
+        self._switch_account_button = ttk.Button(bar, text='切换账号', command=self._switch_account,
+                                                state='disabled' if getattr(self, '_qq_exiting', False) else 'normal')
+        self._switch_account_button.pack(side='right', padx=(0, 10))
+        Tooltip(self._switch_account_button, '保存旧账号状态、退出全部 QQ，再启动 NapCat 登录其他账号；新账号确认前不回复。')
 
     def _build_conversation_list(self, parent: ttk.Frame) -> None:
         title = ttk.Frame(parent)
@@ -400,6 +543,9 @@ class DesktopApp:
             foreground="#6b7280",
         )
         self._history_status.pack(side="left", padx=(10, 0))
+        ttk.Button(header, text='复制管理标识', command=lambda: self._copy_text(
+            ConversationIdentityResolver.for_item(self._current)) if self._current else None).pack(side='left', padx=4)
+        self._new_messages_hint = ttk.Button(parent, text='有新消息 · 点击回到底部', command=self._scroll_to_bottom)
         navigation = ttk.Frame(header)
         navigation.pack(side="right")
         self._navigation_buttons: dict[str, ttk.Button] = {}
@@ -437,6 +583,7 @@ class DesktopApp:
         self._input.bind("<Control-Return>", self._send_from_event)
         self._send_button = ttk.Button(composer, text="发送\nCtrl+Enter", command=self._send, state="disabled")
         self._send_button.pack(side="right", padx=(10, 0), fill="y")
+        self._load_draft()
 
     def _sync_scroll_region(self, _event=None) -> None:
         self._chat_canvas.configure(scrollregion=self._chat_canvas.bbox("all"))
@@ -465,8 +612,27 @@ class DesktopApp:
         self.root.after(120, self._poll_events)
 
     def _handle_event(self, event: UiEvent) -> None:
+        if getattr(self, '_qq_paused', False) or getattr(self, '_qq_exiting', False):
+            return
+        if event.runtime_id and event.runtime_id != getattr(self.runtime, 'runtime_id', None):
+            return
+        if event.kind in {'login', 'directory'} and 'connection_epoch' in event.payload:
+            if event.payload['connection_epoch'] != getattr(self.runtime, '_connection_epoch', None):
+                return  # do not enable sends using a login response from the old connection
+        if event.kind in {'login', 'directory'}:
+            if event.payload['account_id'] != getattr(self.runtime, 'account_id', event.payload['account_id']):
+                return  # login/directory queued before the account changed cannot reactivate it
+        if event.kind == "controls":
+            self._sync_controls(event.payload)
+            return
+        if event.kind == "dry_run":
+            if hasattr(self, "_dry_var"):
+                self._dry_var.set(bool(event.payload))
+            return
         if event.kind == "status":
             status, detail = event.payload
+            self._connection_notice = detail or ('连接已断开，正在等待 QQ / NapCat 恢复' if status == 'disconnected' else '')
+            self._ws_state = {'connecting': '连接中', 'connected': '已连接', 'disconnected': '已断开', 'error': '连接失败', 'stopped': '未连接'}.get(status, status)
             labels = {
                 "connecting": ("QQ 登录中…", "#b45309"),
                 "connected": ("NapCat 已连接，正在确认账号…", "#2563eb"),
@@ -476,19 +642,38 @@ class DesktopApp:
             }
             text, color = labels.get(status, (str(status), "#6b7280"))
             if hasattr(self, "_status") and self._status.winfo_exists():
-                self._status.configure(text=text, foreground=color)
+                self._status.configure(text=self._connection_status(detail), foreground=color)
             if status in {"disconnected", "error", "stopped"}:
                 self._set_connected_controls(False)
             return
         if event.kind == "login":
+            self._connection_notice = ''
             account_id = event.payload["account_id"]
             nickname = event.payload.get("nickname") or account_id
             self._activate_account(account_id, nickname)
-            self._set_connected_controls(True)
+            self._takeover_conversations = {
+                (account_id, conversation_id)
+                for conversation_id in event.payload.get("takeovers", ())
+            }
+            self._set_connected_controls(getattr(self.runtime, 'connected', True))
             self._refresh_conversations()
+            if self._current and hasattr(self, '_takeover_var'):
+                self._takeover_var.set((account_id, self._current.conversation_id) in self._takeover_conversations)
+            return
+        if event.kind == 'account_waiting':
+            if event.payload['connection_epoch'] != getattr(self.runtime, '_connection_epoch', None):
+                return
+            self._activate_account('', '')
+            self._set_connected_controls(False)
+            self._connection_notice = event.payload['message']
+            if hasattr(self, '_status') and self._status.winfo_exists():
+                self._status.configure(text=self._connection_status(), foreground='#b45309')
             return
         if event.kind == "directory":
+            self._connection_notice = ''
             self._load_directory(event.payload)
+            if hasattr(self, '_status') and self._status.winfo_exists():
+                self._status.configure(text=self._connection_status())
             return
         if event.kind == "message":
             self._record_inbound(event.payload)
@@ -496,7 +681,38 @@ class DesktopApp:
         if event.kind == "outbound":
             self._record_outbound(event.payload)
             return
+        if event.kind == 'delivery':
+            record = event.payload
+            current_id = self._current.conversation_id if self._current else None
+            self.repository.record_delivery(record, increment_unread=(
+                record['account_id'] == self._account_id and record['conversation_id'] != current_id))
+            if record['account_id'] == self._account_id and record['status'] in {'sent', 'simulated'} and 'human_self' not in record['metadata_json']:
+                self._model_state = '正常（最近一次生成成功）'
+                if hasattr(self, '_status') and self._status.winfo_exists():
+                    self._status.configure(text=self._connection_status())
+            if record['account_id'] == self._account_id:
+                self._refresh_conversations()
+                if self._current and record['conversation_id'] == self._current.conversation_id:
+                    self._refresh_messages()
+            return
+        if event.kind == 'model_error':
+            payload = event.payload
+            if payload['account_id'] != self._account_id:
+                return
+            self._model_state = payload['message']
+            if hasattr(self, '_status') and self._status.winfo_exists():
+                self._status.configure(text=self._connection_status())
+            self.repository.record_message(platform='qq', account_id=payload['account_id'],
+                conversation_id=payload['conversation_id'], event_key=f"error:{payload.get('event_id', uuid4().hex)}",
+                sender_id='', sender_name='模型状态（仅本地）', role='assistant', source_type='model_error',
+                text=payload['message'], parts_json='[]', created_at=datetime.now(UTC).isoformat(),
+                increment_unread=False, status='failed')
+            if self._current and self._account_id == payload['account_id'] and self._current.conversation_id == payload['conversation_id']:
+                self._refresh_messages()
+            return
         if event.kind == "takeover":
+            if event.payload.get("account_id", self._account_id) != self._account_id:
+                return
             self._set_takeover_state(
                 str(event.payload["conversation_id"]),
                 bool(event.payload["enabled"]),
@@ -508,16 +724,32 @@ class DesktopApp:
         if event.kind == "history_error":
             self._history_load_failed(event.payload)
             return
-        if event.kind in {"fatal", "directory_error", "send_error"}:
+        if event.kind == 'directory_error':
+            self._connection_notice = str(event.payload)
+            if hasattr(self, '_status') and self._status.winfo_exists():
+                self._status.configure(text=self._connection_status(), foreground='#b45309')
+            return  # automatic retries must never open modal error dialogs
+        if event.kind in {"fatal", "send_error"}:
             messagebox.showerror("QQ", str(event.payload), parent=self.root)
 
     def _activate_account(self, account_id: str, nickname: str | None) -> None:
         if self._account_id and self._account_id != account_id:
+            self._save_draft()
+            self._save_reading_position()
             self._current = None
             self._items.clear()
             self._takeover_conversations.clear()
             self._history_loaded.clear()
             self._history_inflight.clear()
+            self._photo_refs = {key: value for key, value in self._photo_refs.items() if not key.startswith(('avatar:', 'media:'))}
+            self._avatar_attempted.clear()
+            self._rendered_key = None
+            self._rendered_ids = ()
+            self._message_rows.clear()
+            self._view_revision += 1
+            self._model_state = '待验证（新账号尚未请求）'
+            if hasattr(self, '_input') and self._input.winfo_exists():
+                self._input.delete('1.0', 'end')
             if hasattr(self, "_message_frame") and self._message_frame.winfo_exists():
                 for child in self._message_frame.winfo_children():
                     child.destroy()
@@ -528,17 +760,23 @@ class DesktopApp:
             if hasattr(self, "_takeover_widget") and self._takeover_widget.winfo_exists():
                 self._takeover_var.set(False)
                 self._takeover_widget.configure(state="disabled")
+            if hasattr(self, '_tree') and self._tree.winfo_exists():
+                for category in ('category:private', 'category:group'):
+                    for item in self._tree.get_children(category): self._tree.delete(item)
         self._account_id = account_id
         self._login_name = nickname or account_id
-        self._webui_opened = True
+        if account_id:
+            self._webui_opened = True
         if hasattr(self, "_status") and self._status.winfo_exists():
             self._status.configure(
-                text=f"已登录：{self._login_name}（QQ：{account_id}）",
-                foreground="#15803d",
+                text=self._connection_status(),
+                foreground="#15803d" if account_id else '#b45309',
             )
 
     def _load_directory(self, payload: dict[str, Any]) -> None:
         account_id = payload["account_id"]
+        if self._account_id and account_id != self._account_id:
+            return
         for friend in payload.get("friends", []):
             user_id = str(friend.get("user_id", "")).strip()
             if not user_id:
@@ -581,9 +819,13 @@ class DesktopApp:
             return
         message = parsed.message
         if message.account_id and message.account_id != self._account_id:
+            if self._account_id:
+                return  # stale queued events never switch a confirmed account
             self._activate_account(message.account_id, None)
         if message.is_self and source_type == "ai_generated":
             return
+        if message.is_self and self.repository.has_delivery_receipt(message):
+            return  # ACKed local/manual sends already have a status-bearing bubble
         existing = self._items.get(message.conversation_id)
         display_name = existing.display_name if existing else (
             parsed.nickname or (f"群 {parsed.group_id}" if parsed.group_id else parsed.peer_id)
@@ -649,6 +891,7 @@ class DesktopApp:
             parts_json=json.dumps([{"type": "text", "text": message.text}], ensure_ascii=False),
             created_at=payload["created_at"],
             increment_unread=(source_type == "ai_generated" and current_id != message.conversation_id),
+            status='simulated' if payload.get('dry_run', False) else 'sent',
         )
         if inserted:
             self._refresh_conversations()
@@ -659,6 +902,7 @@ class DesktopApp:
         if not self._account_id or not hasattr(self, "_tree") or not self._tree.winfo_exists():
             return
         selected = self._current.conversation_id if self._current else None
+        self._items.clear()
         self._suppress_selection = True
         for category in ("private", "group"):
             parent = f"category:{category}"
@@ -704,6 +948,17 @@ class DesktopApp:
                     self._request_avatar(conversation.conversation_id, conversation.avatar_url)
         if selected and self._tree.exists(selected):
             self._tree.selection_set(selected)
+        elif selected:
+            self._current = None
+            if hasattr(self, "_chat_title"):
+                self._chat_title.configure(text="选择左侧会话")
+            if hasattr(self, "_pin_button"):
+                self._pin_button.configure(state="disabled")
+            if hasattr(self, "_send_button"):
+                self._send_button.configure(state="disabled")
+            if hasattr(self, "_takeover_widget"):
+                self._takeover_var.set(False)
+                self._takeover_widget.configure(state="disabled")
         self.root.after_idle(self._enable_selection_events)
 
     def _enable_selection_events(self) -> None:
@@ -732,7 +987,10 @@ class DesktopApp:
         conversation = self._items.get(selection[0])
         if conversation is None:
             return
+        self._save_draft()
+        self._save_reading_position()
         self._current = conversation
+        self._load_draft()
         self.repository.mark_read(
             platform="qq",
             account_id=conversation.account_id,
@@ -740,11 +998,14 @@ class DesktopApp:
         )
         self._chat_title.configure(text=f"{conversation.display_name}  ·  {conversation.peer_id}")
         self._pin_button.configure(text="取消置顶" if conversation.pinned else "置顶", state="normal")
-        self._send_button.configure(state="normal")
+        connected = (not getattr(self, '_qq_paused', False) and not getattr(self, '_qq_exiting', False)
+                     and conversation.account_id == self._account_id
+                     and bool(getattr(self.runtime, 'connected', True)))
+        self._send_button.configure(state='normal' if connected else 'disabled')
         self._takeover_var.set(
-            conversation.conversation_id in self._takeover_conversations
+            (conversation.account_id, conversation.conversation_id) in self._takeover_conversations
         )
-        self._takeover_widget.configure(state="normal")
+        self._takeover_widget.configure(state='normal' if connected else 'disabled')
         self._tree.set(conversation.conversation_id, "unread", "")
         self._refresh_messages()
         self._request_history(conversation)
@@ -756,6 +1017,8 @@ class DesktopApp:
         self._tree.selection_set(conversation_id)
         self._tree.focus(conversation_id)
         self._tree.see(conversation_id)
+        # Explicit navigation/clicks take precedence over queued refresh events.
+        self._suppress_selection = False
         self._select_conversation()
 
     def _navigate_conversation(self, direction: int) -> None:
@@ -844,7 +1107,7 @@ class DesktopApp:
                 text="正在同步最近历史…",
                 foreground="#6b7280",
             )
-        self.runtime.load_history(conversation.conversation_id)
+        self.runtime.load_history(conversation.conversation_id, account_id=conversation.account_id)
 
     def _record_history(self, payload: dict[str, Any]) -> None:
         account_id = str(payload.get("account_id", ""))
@@ -859,6 +1122,8 @@ class DesktopApp:
                 continue
             message = parsed.message
             if message.conversation_id != conversation_id:
+                continue
+            if message.is_self and self.repository.has_delivery_receipt(message):
                 continue
             self.repository.record_message(
                 platform="qq",
@@ -923,7 +1188,18 @@ class DesktopApp:
     def _refresh_messages(self) -> None:
         if self._current is None:
             return
+        frame = getattr(self, '_message_frame', None)
+        if frame is not None and hasattr(frame, 'winfo_exists') and not frame.winfo_exists():
+            return  # home/settings still persist events, but have no chat widgets
         conversation = self._current
+        key = (conversation.account_id, conversation.conversation_id)
+        if getattr(self, '_rendered_key', None) == key:
+            self._save_reading_position()
+        position = getattr(self, '_scroll_states', {}).get(key, ReadingPosition())
+        if getattr(self, '_force_follow_key', None) == key:
+            position = ReadingPosition()
+            self._force_follow_key = None
+        old_ids = getattr(self, '_rendered_ids', ()) if getattr(self, '_rendered_key', None) == key else ()
         try:
             messages = self.repository.list_messages(
                 platform="qq",
@@ -948,6 +1224,7 @@ class DesktopApp:
             return
         for child in self._message_frame.winfo_children():
             child.destroy()
+        self._message_rows = {}
         if not messages:
             history_key = (
                 conversation.account_id,
@@ -972,11 +1249,22 @@ class DesktopApp:
                     "desktop_message_render_failed message_id=%s",
                     message.id,
                 )
-        self.root.after(20, lambda: self._chat_canvas.yview_moveto(1.0))
+        self._rendered_key = key
+        self._rendered_ids = tuple(message.id for message in messages)
+        self._view_revision = getattr(self, '_view_revision', 0) + 1
+        revision = self._view_revision
+        self.root.after(20, lambda: self._restore_reading_position(key, revision, position))
+        hint = getattr(self, '_new_messages_hint', None)
+        if hint is not None:
+            if not position.follow and has_new_tail(old_ids, self._rendered_ids):
+                hint.pack(fill='x', before=self._chat_canvas)
+            elif position.follow:
+                hint.pack_forget()
 
     def _render_message(self, message: DesktopMessage) -> None:
         row = tk.Frame(self._message_frame, background="#f6f7f9")
         row.pack(fill="x", padx=12, pady=5)
+        self._message_rows[message.id] = row
         side = "right" if message.role == "assistant" else "left"
         bubble_color = "#dbeafe" if message.role == "assistant" else "#ffffff"
         bubble = tk.Frame(row, background=bubble_color, padx=11, pady=8)
@@ -988,6 +1276,15 @@ class DesktopApp:
             foreground="#6b7280",
             font=("Microsoft YaHei UI", 8),
         ).pack(anchor="e" if side == "right" else "w", pady=(0, 3))
+        if message.role == 'assistant' and message.status != 'received':
+            label = STATUS_LABELS.get(message.status, '旧记录（发送状态未确认）')
+            tk.Label(bubble, text=label, background=bubble_color, foreground='#64748b', font=('Microsoft YaHei UI', 8)).pack(anchor='w')
+        if message.error_text:
+            tk.Label(bubble, text=message.error_text, background=bubble_color, wraplength=550, foreground='#b91c1c').pack(anchor='w')
+        if message.delivery_id and message.status in {'failed', 'unknown', 'candidate'}:
+            tk.Button(bubble, text='复制正文', command=lambda text=message.text: self._copy_text(text)).pack(anchor='w')
+            if message.status == 'failed' and message.source_type == 'human_self':
+                tk.Button(bubble, text='重试原消息', command=lambda record_id=message.delivery_id: self.runtime.retry_delivery(record_id) if self.runtime else None).pack(anchor='w')
         try:
             parts = json.loads(message.parts_json)
         except (json.JSONDecodeError, TypeError):
@@ -1017,6 +1314,10 @@ class DesktopApp:
     def _is_expression(text: str) -> bool:
         stripped = text.strip()
         return stripped.startswith("[QQ表情") or stripped.startswith("[QQ商城表情")
+
+    def _copy_text(self, text: str) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
 
     def _render_expression_part(self, parent: tk.Frame, color: str, text: str) -> None:
         button = tk.Button(
@@ -1071,6 +1372,7 @@ class DesktopApp:
         threading.Thread(target=worker, name="chatbot-image-preview", daemon=True).start()
 
     def _request_avatar(self, conversation_id: str, url: str) -> None:
+        account_id = self._account_id
         if conversation_id in self._avatar_attempted:
             return
         self._avatar_attempted.add(conversation_id)
@@ -1092,7 +1394,7 @@ class DesktopApp:
                     exc_info=True,
                 )
             self._media_results.put(
-                (self._set_avatar, conversation_id, data)
+                (self._set_avatar, conversation_id, data, account_id)
             )
 
         threading.Thread(
@@ -1101,7 +1403,9 @@ class DesktopApp:
             daemon=True,
         ).start()
 
-    def _set_avatar(self, conversation_id: str, data: bytes | None) -> None:
+    def _set_avatar(self, conversation_id: str, data: bytes | None, account_id: str | None = None) -> None:
+        if account_id is not None and account_id != self._account_id:
+            return
         if not data:
             return
         try:
@@ -1146,15 +1450,25 @@ class DesktopApp:
     def _send(self) -> None:
         if self._current is None or self.runtime is None:
             return
+        if getattr(self, '_qq_paused', False) or getattr(self, '_qq_exiting', False):
+            self._save_draft()
+            return
         text = self._input.get("1.0", "end-1c").strip()
         if not text:
             return
-        self.runtime.send_message(self._current.conversation_id, text)
+        target = self._current
+        if self.runtime.send_message(target.conversation_id, text, account_id=target.account_id) is False:
+            self._save_draft()
+            return
         self._input.delete("1.0", "end")
+        if hasattr(self.repository, 'save_draft'):
+            self.repository.save_draft(target.account_id, target.conversation_id, '')
+        self._force_follow_key = (target.account_id, target.conversation_id)
 
     def _toggle_pin(self) -> None:
         if self._current is None:
             return
+        self._save_draft()
         self.repository.set_pinned(
             platform="qq",
             account_id=self._current.account_id,
@@ -1222,10 +1536,11 @@ class DesktopApp:
                 button.configure(state="disabled")
 
     def _set_takeover_state(self, conversation_id: str, enabled: bool) -> None:
+        key = (self._account_id, conversation_id)
         if enabled:
-            self._takeover_conversations.add(conversation_id)
+            self._takeover_conversations.add(key)
         else:
-            self._takeover_conversations.discard(conversation_id)
+            self._takeover_conversations.discard(key)
         if self._current and self._current.conversation_id == conversation_id:
             self._takeover_var.set(enabled)
 
@@ -1234,20 +1549,28 @@ class DesktopApp:
             self._takeover_var.set(False)
             return
         enabled = self._takeover_var.get()
-        self._set_takeover_state(self._current.conversation_id, enabled)
-        self.runtime.set_human_takeover(self._current.conversation_id, enabled)
+        self._takeover_var.set(
+            (self._current.account_id, self._current.conversation_id) in self._takeover_conversations
+        )
+        self.runtime.set_human_takeover(self._current.conversation_id, enabled, account_id=self._current.account_id)
 
     def _toggle_auto(self) -> None:
         if self.runtime:
-            self.runtime.set_auto_reply(self._auto_var.get())
+            enabled = self._auto_var.get()
+            self._auto_var.set(self.runtime.controls.auto_reply)
+            self.runtime.set_auto_reply(enabled)
 
     def _toggle_proactive(self) -> None:
         if self.runtime:
-            self.runtime.set_proactive(self._proactive_var.get())
+            enabled = self._proactive_var.get()
+            self._proactive_var.set(self.runtime.controls.proactive)
+            self.runtime.set_proactive(enabled)
 
     def _toggle_followup(self) -> None:
         if self.runtime:
-            self.runtime.set_followup(self._followup_var.get())
+            enabled = self._followup_var.get()
+            self._followup_var.set(self.runtime.controls.followup)
+            self.runtime.set_followup(enabled)
 
     def _toggle_dry(self) -> None:
         if not self._dry_var.get():
@@ -1260,7 +1583,16 @@ class DesktopApp:
                 self._dry_var.set(True)
                 return
         if self.runtime:
-            self.runtime.set_dry_run(self._dry_var.get())
+            enabled = self._dry_var.get()
+            self._dry_var.set(self.runtime.controls.dry_run)
+            self.runtime.set_dry_run(enabled)
+
+    def _sync_controls(self, controls: RuntimeControls) -> None:
+        for name, field in (("_auto_var", "auto_reply"), ("_proactive_var", "proactive"),
+                            ("_followup_var", "followup"), ("_dry_var", "dry_run")):
+            variable = getattr(self, name, None)
+            if variable is not None:
+                variable.set(getattr(controls, field))
 
     def _open_settings(self) -> None:
         SettingsDialog(
@@ -1276,12 +1608,183 @@ class DesktopApp:
         self._configuration_error = error
 
     def _close(self) -> None:
+        if self._qq_exiting:
+            messagebox.showinfo('QQ', '正在安全退出 QQ，请等待完成后再关闭窗口。', parent=self.root)
+            return
+        self._webui_cancel.set()
+        self._save_draft()
         if self.runtime is not None:
             self.runtime.stop()
         self.root.destroy()
 
+    def _switch_account(self) -> None:
+        if self._qq_exiting:
+            return
+        if not is_local_webui(self.settings.qq_webui_url):
+            messagebox.showwarning('切换账号', '当前 WebUI 位于远端。请在远端切换 QQ 账号后重新连接；不会清理本机 QQ。', parent=self.root)
+            return
+        self._exit_qq(switch_account=True)
 
-def run() -> None:
+    def _exit_qq(self, *, switch_account: bool = False) -> None:
+        if self._qq_exiting:
+            return
+        title = '切换 QQ 账号' if switch_account else '安全退出 QQ'
+        if not messagebox.askyesno(title,
+                ('将退出旧账号并重新启动 NapCat，请在登录页选择另一个 QQ 账号。\n' if switch_account else '')
+                + '将保存草稿、停止自动回复/主动聊天/追加回复及重连，\n'
+                '然后退出本机全部 QQ 账号的后台（包括其他手动打开的 QQ）。\n'
+                '优先正常退出，仍驻留的进程会被强制结束；不会删除聊天记录或配置。\n\n'
+                '已经提交平台的消息无法撤回，结果未知的消息请核对 QQ。继续吗？', parent=self.root):
+            return
+        self._save_draft()
+        self._save_reading_position()
+        self._qq_exiting = self._qq_paused = True
+        self._qq_switch_after_exit = switch_account
+        self._switch_from_account = (getattr(self.runtime, 'account_id', None) or self._account_id
+            or getattr(self.runtime, 'last_confirmed_account_id', None)) if switch_account else None
+        self._webui_cancel.set()
+        self._webui_starting = False
+        runtime = self.runtime
+        if runtime is not None:
+            runtime.request_stop()  # gate sends now, not after the worker is scheduled
+        self._set_connected_controls(False)
+        self._qq_exit_button.configure(state='disabled')
+        self._retry_button.configure(state='disabled')
+        self._switch_account_button.configure(state='disabled')
+        self._status.configure(text='正在安全退出 QQ：保存状态 → 停止聊天任务 → 清理全部 QQ 后台', foreground='#b45309')
+
+        def worker():
+            try:
+                with self._webui_launcher_lock:
+                    launcher = self._napcat_launcher_process
+                result = shutdown_qq_session(runtime, owned_launcher=launcher)
+                self._media_results.put((self._qq_exit_finished, result, None))
+            except QQShutdownError as exc:
+                self._media_results.put((self._qq_exit_finished, None, str(exc)))
+            except Exception as exc:
+                logger.error('qq_shutdown_failed error_type=%s', type(exc).__name__)
+                self._media_results.put((self._qq_exit_finished, None, 'QQ 退出未完成，请核对任务管理器及权限'))
+
+        threading.Thread(target=worker, name='chatbot-qq-shutdown', daemon=True).start()
+
+    def _qq_exit_finished(self, result, error) -> None:
+        # The user may keep editing while the background shutdown is pending.
+        self._save_draft()
+        self._save_reading_position()
+        switch_account = self._qq_switch_after_exit
+        previous_account = self._switch_from_account
+        self._qq_switch_after_exit = False
+        self._switch_from_account = None
+        self._qq_exiting = False
+        self._account_id = self._login_name = ''
+        self._current = None
+        self._items.clear()
+        self._history_loaded.clear()
+        self._history_inflight.clear()
+        self._takeover_conversations.clear()
+        self._rendered_key = None
+        self._rendered_ids = ()
+        self._message_rows.clear()
+        self._photo_refs = {key: value for key, value in self._photo_refs.items()
+                            if not key.startswith(('avatar:', 'media:'))}
+        self._avatar_attempted.clear()
+        self._view_revision += 1
+        self._webui_opened = False
+        self._ws_state = '已停止（不会自动重连）'
+        self._model_state = '已停止'
+        self._connection_notice = error or ('QQ 已安全退出，全部 QQ 后台已清理' if result.success
+            else f'仍有 {len(result.remaining_pids)} 个 QQ 进程未退出；检查权限或外部自动拉起程序')
+        self._set_connected_controls(False)
+        for name in ('_qq_exit_button', '_retry_button', '_switch_account_button'):
+            widget = getattr(self, name, None)
+            if widget is not None and widget.winfo_exists():
+                widget.configure(state='normal')
+        if hasattr(self, '_input') and self._input.winfo_exists():
+            self._input.delete('1.0', 'end')
+        if hasattr(self, '_message_frame') and self._message_frame.winfo_exists():
+            for child in self._message_frame.winfo_children(): child.destroy()
+        if hasattr(self, '_tree') and self._tree.winfo_exists():
+            for category in ('category:private', 'category:group'):
+                for item in self._tree.get_children(category): self._tree.delete(item)
+        if hasattr(self, '_chat_title') and self._chat_title.winfo_exists():
+            self._chat_title.configure(text='选择左侧会话')
+        if hasattr(self, '_history_status') and self._history_status.winfo_exists():
+            self._history_status.configure(text='')
+        if hasattr(self, '_new_messages_hint') and self._new_messages_hint.winfo_exists():
+            self._new_messages_hint.pack_forget()
+        if hasattr(self, '_status') and self._status.winfo_exists():
+            self._status.configure(text=self._connection_status(), foreground='#b45309' if error or not result.success else '#15803d')
+        if error or not result.success:
+            messagebox.showwarning('QQ 退出未完成', self._connection_notice, parent=self.root)
+        elif switch_account:
+            self._replace_qq_runtime(avoid_account_id=previous_account)
+            self._connection_notice = '旧账号已退出，请在 NapCat 登录其他账号；等待 OneBot 确认新账号'
+            if hasattr(self, '_status') and self._status.winfo_exists():
+                self._status.configure(text=self._connection_status(), foreground='#b45309')
+            # A surviving WebUI port is not proof that the killed QQ has restarted.
+            self._begin_webui_launch(force_start=True)
+
+    def _save_draft(self) -> None:
+        current = getattr(self, '_current', None)
+        widget = getattr(self, '_input', None)
+        if current and widget is not None and widget.winfo_exists() and hasattr(self.repository, 'save_draft'):
+            self.repository.save_draft(current.account_id, current.conversation_id, widget.get('1.0', 'end-1c'))
+
+    def _load_draft(self) -> None:
+        current = getattr(self, '_current', None)
+        widget = getattr(self, '_input', None)
+        if widget is not None and widget.winfo_exists() and hasattr(self.repository, 'load_draft'):
+            widget.delete('1.0', 'end')
+            if current:
+                widget.insert('1.0', self.repository.load_draft(current.account_id, current.conversation_id))
+
+    def _save_reading_position(self) -> None:
+        current = getattr(self, '_current', None)
+        canvas = getattr(self, '_chat_canvas', None)
+        if current is None or canvas is None or not canvas.winfo_exists():
+            return
+        key = (current.account_id, current.conversation_id)
+        if getattr(self, '_rendered_key', None) != key:
+            return
+        top = canvas.canvasy(0)
+        rows = getattr(self, '_message_rows', {})
+        anchor = next(((mid, row) for mid, row in rows.items() if row.winfo_y() + row.winfo_height() >= top), None)
+        if not hasattr(self, '_scroll_states'):
+            self._scroll_states = {}
+        self._scroll_states[key] = ReadingPosition(near_bottom(canvas.yview()), anchor[0] if anchor else None,
+                                                  top - anchor[1].winfo_y() if anchor else 0, canvas.yview()[0])
+
+    def _restore_reading_position(self, key, revision, position) -> None:
+        if getattr(self, '_rendered_key', None) != key or self._view_revision != revision:
+            return  # stale history/render callback cannot scroll a different contact
+        canvas = self._chat_canvas
+        canvas.update_idletasks()
+        self._sync_scroll_region()
+        if position.follow:
+            canvas.yview_moveto(1)
+            return
+        row = self._message_rows.get(position.anchor_id)
+        region = canvas.bbox('all')
+        if row is not None and region and region[3] > 0:
+            canvas.yview_moveto(max(0, (row.winfo_y() + position.offset) / region[3]))
+        else:
+            canvas.yview_moveto(position.fraction)
+
+    def _scroll_to_bottom(self) -> None:
+        self._chat_canvas.yview_moveto(1)
+        if hasattr(self, '_new_messages_hint'):
+            self._new_messages_hint.pack_forget()
+        self._save_reading_position()
+
+    def _connection_status(self, detail=None) -> str:
+        webui = '已打开（不代表登录）' if getattr(self, '_webui_opened', False) else '未打开'
+        account = f"{self._login_name} ({self._account_id})" if self._account_id else '待登录/确认'
+        model = getattr(self, '_model_state', '待验证')
+        detail = detail or getattr(self, '_connection_notice', '')
+        return f"WebUI：{webui} · QQ：{account} · OneBot：{getattr(self, '_ws_state', '未连接')} · 模型：{model}" + (f' · {detail}' if detail else '')
+
+
+def run(*, auto_open_qq: bool = False, startup_hint: str | None = None) -> None:
     log_path = PROJECT_ROOT / "data" / "chatbot.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -1291,7 +1794,11 @@ def run() -> None:
         force=True,
     )
     root = tk.Tk()
-    DesktopApp(root)
+    app = DesktopApp(root)
+    if startup_hint:
+        root.after(150, lambda: messagebox.showinfo("便携版启动提示", startup_hint, parent=root))
+    elif auto_open_qq:
+        root.after(150, app._open_qq)
     root.mainloop()
 
 

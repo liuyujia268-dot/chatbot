@@ -5,8 +5,9 @@
 ## 开发基线
 
 - Windows + CMD，Python 3.12+。
-- 运行时依赖只有 `httpx`；测试使用 `pytest`。
-- QQ 通过 NapCat OneBot 正向 WebSocket 接入，NapCat 不由本项目安装或管理。
+- 运行时依赖为 `httpx[socks]`；测试使用 `pytest`。
+- QQ 通过 NapCat OneBot 正向 WebSocket 接入。源码版自行准备 NapCat；便携版可带
+  干净运行文件，但不自动下载安装，也不更改外部实例配置。
 - 安全默认值是 `MODEL_PROVIDER=mock` 和 `QQ_DRY_RUN=true`。
 
 ```bat
@@ -14,7 +15,7 @@ git clone https://gitee.com/sun-ji-kun/chat-bot.git
 cd /d chat-bot
 py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[test]"
-copy .env.example .env
+if not exist .env copy .env.example .env
 .venv\Scripts\python.exe -m pytest -q
 ```
 
@@ -74,7 +75,7 @@ OneBot event
 
 1. `Settings` 字段、`Settings.from_env()` 默认值和校验。
 2. `.env.example` 的无密钥示例。
-3. README 环境变量表。
+3. `docs/USER_GUIDE.md` 环境变量表，必要时同步 README 上手步骤。
 4. 桌面设置存储/窗口（如该项可在 UI 修改）。
 5. 配置与 UI 测试。
 
@@ -100,6 +101,10 @@ git status --short
 ```bat
 .venv\Scripts\python.exe -m app.tools.chat_replay --limit 5
 ```
+
+归档提交说明见 `docs/COMMIT_MESSAGE.txt`。`build-portable.cmd` 复用现有打包工具，
+只收集允许的运行文件，产物输出到 `release`；不要将使用后的便携目录重新分发。
+便携版验证使用 `--self-test`，不会启动真实 QQ 或调用真实模型。
 
 ## 当前限制
 

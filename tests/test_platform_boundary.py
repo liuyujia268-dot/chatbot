@@ -85,7 +85,7 @@ def test_same_platform_message_is_processed_only_once(tmp_path: Path) -> None:
         assert duplicate is None
         assert len(first_model.calls) == 1
         assert second_model.calls == []
-        assert len(database.list_messages("contact-1")) == 2
+        assert len(database.list_messages(message.session_id, include_simulated=True)) == 2
 
     asyncio.run(scenario())
 

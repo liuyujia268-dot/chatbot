@@ -9,6 +9,10 @@ from app.storage.database import Database
 
 
 _UI_SCHEMA = """
+CREATE TABLE IF NOT EXISTS desktop_drafts (
+    platform TEXT NOT NULL, account_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    text TEXT NOT NULL, PRIMARY KEY(platform, account_id, conversation_id)
+);
 CREATE TABLE IF NOT EXISTS desktop_conversations (
     platform TEXT NOT NULL,
     account_id TEXT NOT NULL,
@@ -86,6 +90,9 @@ class DesktopMessage:
     text: str
     parts_json: str
     created_at: str
+    status: str = "received"
+    delivery_id: str | None = None
+    error_text: str | None = None
 
 
 class DesktopRepository:
@@ -97,6 +104,10 @@ class DesktopRepository:
     def initialize(self) -> None:
         with self._database.connect() as connection:
             connection.executescript(_UI_SCHEMA)
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(desktop_messages)')}
+            for name, definition in (('status', "TEXT NOT NULL DEFAULT 'legacy_unknown'"), ('delivery_id', 'TEXT'), ('error_text', 'TEXT')):
+                if name not in columns:
+                    connection.execute(f'ALTER TABLE desktop_messages ADD COLUMN {name} {definition}')
 
     def upsert_conversation(
         self,
@@ -163,6 +174,17 @@ class DesktopRepository:
                 ),
             )
 
+    def save_draft(self, account_id: str, conversation_id: str, text: str) -> None:
+        with self._database.connect() as conn:
+            conn.execute("INSERT INTO desktop_drafts VALUES ('qq',?,?,?) ON CONFLICT(platform,account_id,conversation_id) "
+                         "DO UPDATE SET text=excluded.text", (account_id, conversation_id, text))
+
+    def load_draft(self, account_id: str, conversation_id: str) -> str:
+        with self._database.connect() as conn:
+            row = conn.execute("SELECT text FROM desktop_drafts WHERE platform='qq' AND account_id=? AND conversation_id=?",
+                               (account_id, conversation_id)).fetchone()
+        return str(row[0]) if row else ''
+
     def list_conversations(
         self,
         *,
@@ -176,6 +198,7 @@ class DesktopRepository:
                 "peer_id, display_name, nickname, avatar_url, pinned, sort_order, "
                 "unread_count FROM desktop_conversations WHERE platform = ? "
                 "AND account_id = ? AND conversation_type = ? "
+                "AND NOT (platform='qq' AND conversation_type='private' AND peer_id=account_id) "
                 "ORDER BY pinned DESC, sort_order ASC",
                 (platform, account_id, conversation_type),
             ).fetchall()
@@ -243,13 +266,14 @@ class DesktopRepository:
         parts_json: str,
         created_at: str,
         increment_unread: bool,
+        status: str = "received",
     ) -> bool:
         with self._database.connect() as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO desktop_messages "
                 "(platform, account_id, conversation_id, event_key, sender_id, "
-                "sender_name, role, source_type, text, parts_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "sender_name, role, source_type, text, parts_json, created_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     platform,
                     account_id,
@@ -262,6 +286,7 @@ class DesktopRepository:
                     text,
                     parts_json,
                     created_at,
+                    status,
                 ),
             )
             if cursor.rowcount != 1:
@@ -279,6 +304,43 @@ class DesktopRepository:
                 ),
             )
         return True
+
+    def has_delivery_receipt(self, message) -> bool:
+        with self._database.connect() as conn:
+            row = conn.execute("SELECT 1 FROM outbound_deliveries WHERE platform=? AND account_id=? "
+                               "AND conversation_id=? AND platform_message_id=? AND status='sent'",
+                               (message.platform, message.account_id, message.conversation_id, message.message_id)).fetchone()
+        return row is not None
+
+    def record_delivery(self, record: dict, *, increment_unread: bool = False) -> None:
+        import json
+        metadata = json.loads(record['metadata_json'])
+        with self._database.connect() as conn:
+            previous = conn.execute('SELECT status FROM desktop_messages WHERE platform=? AND account_id=? AND event_key=?',
+                                    (record['platform'], record['account_id'], f"delivery:{record['id']}")).fetchone()
+        self.record_message(platform=record['platform'], account_id=record['account_id'],
+            conversation_id=record['conversation_id'], event_key=f"delivery:{record['id']}",
+            sender_id=record['account_id'], sender_name=str(metadata.get('sender_name', '机器人')),
+            role='assistant', source_type=str(metadata.get('source_type', 'ai_generated')),
+            text=record['text'], parts_json='[]', created_at=record['created_at'],
+            increment_unread=False, status=record['status'])
+        with self._database.connect() as conn:
+            conn.execute('UPDATE desktop_messages SET status=?, delivery_id=?, error_text=? '
+                         'WHERE platform=? AND account_id=? AND event_key=?', (record['status'], record['id'], record['error_text'],
+                            record['platform'], record['account_id'], f"delivery:{record['id']}"))
+            if (increment_unread and metadata.get('source_type', 'ai_generated') == 'ai_generated'
+                    and record['status'] in {'sent', 'simulated'}
+                    and (previous is None or previous[0] not in {'sent', 'simulated'})):
+                conn.execute('UPDATE desktop_conversations SET unread_count=unread_count+1 '
+                             'WHERE platform=? AND account_id=? AND conversation_id=?',
+                             (record['platform'], record['account_id'], record['conversation_id']))
+
+    def sync_deliveries(self, platform: str, account_id: str, conversation_id: str) -> None:
+        with self._database.connect() as conn:
+            rows = conn.execute('SELECT * FROM outbound_deliveries WHERE platform=? AND account_id=? AND conversation_id=?',
+                                (platform, account_id, conversation_id)).fetchall()
+        for row in rows:
+            self.record_delivery(dict(row))
 
     def mark_read(
         self,
@@ -303,10 +365,11 @@ class DesktopRepository:
         conversation_id: str,
         limit: int = 200,
     ) -> list[DesktopMessage]:
+        self.sync_deliveries(platform, account_id, conversation_id)
         with self._database.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM (SELECT id, conversation_id, sender_id, "
-                "sender_name, role, source_type, text, parts_json, created_at "
+                "sender_name, role, source_type, text, parts_json, created_at, status, delivery_id, error_text "
                 "FROM desktop_messages WHERE platform = ? AND account_id = ? "
                 "AND conversation_id = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?) "
@@ -324,6 +387,7 @@ class DesktopRepository:
                 text=str(row["text"]),
                 parts_json=str(row["parts_json"]),
                 created_at=str(row["created_at"]),
+                status=str(row['status']), delivery_id=row['delivery_id'], error_text=row['error_text'],
             )
             for row in rows
         ]

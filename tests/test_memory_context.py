@@ -75,3 +75,36 @@ def test_debug_output_redacts_api_key_and_is_off_by_default(tmp_path: Path) -> N
     engine.build_model_messages(session)
     assert api_key not in output[-1]
     assert "***" in output[-1]
+
+
+def test_public_profile_image_path_is_hidden_from_model_and_debug(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "memory.db")
+    database.initialize()
+    service = MemoryService(MemoryRepository(database))
+    hidden_path = "app/assets/whale_girl_profile.jpg"
+    service.set_account_profile("public_image_path", hidden_path)
+    debugger = ContextDebugger(enabled=True)
+    context = service.context_for("张三", "把你的资料发我看看")
+
+    system_text = "\n".join(
+        message.content
+        for message in MemoryContextProvider.system_messages(context)
+    )
+    assert "已配置可公开的鲸鱼娘资料图" in system_text
+    assert hidden_path not in system_text
+
+    from app.memory.context import ModelContextSnapshot
+
+    rendered = debugger.render(
+        ModelContextSnapshot(
+            conversation_id="张三",
+            model_messages=(),
+            recent_history=(),
+            current_message=None,
+            memory_context=context,
+        )
+    )
+    assert hidden_path not in rendered
+    assert "public_image_path=<路径隐藏>" in rendered

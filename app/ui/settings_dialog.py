@@ -9,7 +9,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from app.config import Settings
-from app.ui.settings_store import read_env_values, update_env_file
+from app.ui.settings_store import read_env_values, save_validated_env, validate_values
 
 
 _SAVED_SECRET = "••••••••（已保存）"
@@ -26,7 +26,7 @@ class SettingsDialog(tk.Toplevel):
     ) -> None:
         super().__init__(master)
         self.title("设置")
-        self.geometry("650x590")
+        self.geometry("690x740")
         self.minsize(560, 500)
         self.transient(master)
         self._env_path = env_path
@@ -51,7 +51,7 @@ class SettingsDialog(tk.Toplevel):
         footer.pack(fill="x")
         ttk.Label(
             footer,
-            text="模型和连接参数保存后，下次重新连接生效。",
+            text="模型/连接参数需重连；运行开关以顶部实际状态为准。",
             foreground="#6b7280",
         ).pack(side="left")
         ttk.Button(footer, text="取消", command=self.destroy).pack(
@@ -65,6 +65,8 @@ class SettingsDialog(tk.Toplevel):
             ("Base URL", "MODEL_BASE_URL", self._settings.model_base_url or "", False),
             ("API Key", "MODEL_API_KEY", "", True),
             ("模型名称", "MODEL_NAME", self._settings.model_name or "", False),
+            ("模型网络模式", "MODEL_PROXY_MODE", self._settings.model_proxy_mode, False),
+            ("代理地址（仅 custom）", "MODEL_PROXY_URL", "", True),
             ("请求超时（秒）", "MODEL_TIMEOUT_SECONDS", str(self._settings.model_timeout_seconds), False),
             ("Temperature", "MODEL_TEMPERATURE", "" if self._settings.model_temperature is None else str(self._settings.model_temperature), False),
             ("最大生成 Tokens", "MODEL_MAX_TOKENS", str(self._settings.model_max_tokens), False),
@@ -79,11 +81,12 @@ class SettingsDialog(tk.Toplevel):
                 value = _SAVED_SECRET
             variable = tk.StringVar(value=value)
             self._entries[key] = variable
-            if key == "MODEL_PROVIDER":
+            if key in {"MODEL_PROVIDER", "MODEL_PROXY_MODE"}:
                 widget = ttk.Combobox(
                     frame,
                     textvariable=variable,
-                    values=("mock", "openai_compatible"),
+                    values=(("mock", "openai_compatible") if key == "MODEL_PROVIDER"
+                            else ("system", "direct", "custom")),
                     state="readonly",
                 )
             else:
@@ -94,6 +97,12 @@ class SettingsDialog(tk.Toplevel):
                 )
             widget.grid(row=row, column=1, sticky="ew", padx=(18, 0), pady=6)
         frame.columnconfigure(1, weight=1)
+        ttk.Label(
+            frame,
+            text="system：跟随电脑代理；direct：忽略电脑代理直连；custom：使用指定代理。\n"
+                 "代理地址支持 http(s)://、socks5://、socks5h://；不修改系统代理，保存后重连生效。",
+            wraplength=560, foreground="#6b7280",
+        ).grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=12)
 
     def _build_qq_tab(self, frame: ttk.Frame) -> None:
         fields = (
@@ -120,6 +129,7 @@ class SettingsDialog(tk.Toplevel):
                 False,
             ),
             ("OneBot WebSocket", "QQ_WS_URL", self._settings.qq_ws_url, False),
+            ("OneBot Token", "QQ_WS_TOKEN", self._settings.qq_ws_token or "", True),
             (
                 "单次历史消息数",
                 "DESKTOP_HISTORY_MESSAGE_LIMIT",
@@ -167,6 +177,8 @@ class SettingsDialog(tk.Toplevel):
                 "会优先使用独立 WebUI Token；留空时自动读取本机 webui.json。"
                 "它和 OneBot WebSocket Token 不是同一个配置。自动查找不到时，"
                 "可填写 webui.json 的完整路径。"
+                "本机换号时会只读获取当前账号已启用的 WebSocket 地址/Token，"
+                "仅在运行内存中使用；新账号未启用服务时，请在 NapCat 网络配置开启。"
             ),
             wraplength=500,
             foreground="#6b7280",
@@ -175,57 +187,21 @@ class SettingsDialog(tk.Toplevel):
 
     def _save(self) -> None:
         updates = {key: variable.get().strip() for key, variable in self._entries.items()}
-        for key in ("MODEL_API_KEY", "QQ_WEBUI_TOKEN"):
+        for key in ("MODEL_API_KEY", "MODEL_PROXY_URL", "QQ_WEBUI_TOKEN", "QQ_WS_TOKEN"):
             if updates.get(key) == _SAVED_SECRET:
                 updates.pop(key, None)
         for key, variable in self._booleans.items():
             updates[key] = "true" if variable.get() else "false"
         try:
             self._validate(updates)
-            update_env_file(self._env_path, updates)
+            save_validated_env(self._env_path, updates)
         except (OSError, ValueError) as exc:
             messagebox.showerror("无法保存设置", str(exc), parent=self)
             return
         if self._on_saved is not None:
             self._on_saved()
-        messagebox.showinfo("设置已保存", "重新连接 QQ 后生效。", parent=self)
+        messagebox.showinfo("设置已保存", "配置已保存，尚未应用到当前连接。模型/连接参数重新连接QQ后生效；运行开关仍以顶部实际状态为准，保存的默认开关在下次启动使用。", parent=self)
         self.destroy()
 
     def _validate(self, updates: dict[str, str]) -> None:
-        provider = updates.get("MODEL_PROVIDER", "mock")
-        if provider not in {"mock", "openai_compatible"}:
-            raise ValueError("MODEL_PROVIDER 只能是 mock 或 openai_compatible")
-        if provider == "openai_compatible":
-            for key in ("MODEL_BASE_URL", "MODEL_NAME"):
-                if not updates.get(key):
-                    raise ValueError(f"{key} 不能为空")
-            if "MODEL_API_KEY" in updates and not updates["MODEL_API_KEY"]:
-                raise ValueError("MODEL_API_KEY 不能为空")
-            if (
-                "MODEL_API_KEY" not in updates
-                and not self._values.get("MODEL_API_KEY")
-            ):
-                raise ValueError("MODEL_API_KEY 不能为空")
-        for key, schemes in (
-            ("QQ_WEBUI_URL", {"http", "https"}),
-            ("QQ_WS_URL", {"ws", "wss"}),
-        ):
-            parsed = urlsplit(updates[key])
-            if parsed.scheme not in schemes or not parsed.hostname:
-                raise ValueError(f"{key} 地址格式无效")
-        positive_float = ("MODEL_TIMEOUT_SECONDS", "MESSAGE_DEBOUNCE_SECONDS")
-        for key in positive_float:
-            if float(updates[key]) <= 0:
-                raise ValueError(f"{key} 必须大于 0")
-        if updates.get("MODEL_TEMPERATURE"):
-            temperature = float(updates["MODEL_TEMPERATURE"])
-            if not 0 <= temperature < 2:
-                raise ValueError("MODEL_TEMPERATURE 必须在 0 到 2 之间")
-        for key in (
-            "MODEL_MAX_TOKENS",
-            "CONTEXT_MAX_MESSAGES",
-            "MODEL_MAX_OUTPUT_CHARS",
-            "DESKTOP_HISTORY_MESSAGE_LIMIT",
-        ):
-            if int(updates[key]) < 1:
-                raise ValueError(f"{key} 必须大于 0")
+        validate_values(self._values, updates)

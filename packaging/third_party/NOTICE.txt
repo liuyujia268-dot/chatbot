@@ -1,0 +1,16 @@
+NapCat.Shell third-party runtime
+
+Source: https://github.com/NapNeko/NapCatQQ
+Copyright © 2024 Mlikiowa
+License: see LICENSE.txt in this directory.
+This redistribution is for non-commercial use under the upstream license.
+Version and runtime checksum: see chatbot-bundle.json.
+
+The upstream napcat.mjs, native modules, dependencies and WebUI assets are
+copied from an existing installed release without modifying their code.
+Dependency license files remain in node_modules.
+
+Chatbot supplies a separate chatbot-launcher.cmd, a relocatable loadNapCat.js
+and clean local-only configuration templates. No original login configuration,
+tokens, account-specific configuration, databases, logs or cache are included.
+At first use Chatbot creates independent local tokens in the recipient's folder.

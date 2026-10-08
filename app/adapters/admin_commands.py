@@ -10,6 +10,7 @@ from app.memory.processor import MemoryProcessor
 from app.memory.service import MemoryService
 from app.models.base import ModelError
 from app.style.repository import StyleRepository
+from app.core.identity_resolver import ConversationIdentityResolver
 
 
 class AdminCommandHandler:
@@ -22,6 +23,7 @@ class AdminCommandHandler:
         style_repository: StyleRepository | None = None,
         style_export_path: Path | None = None,
         sink: Callable[[str], None] = print,
+        account_provider: Callable[[], str | None] | None = None,
     ) -> None:
         self.service = service
         self.processor = processor
@@ -29,6 +31,19 @@ class AdminCommandHandler:
         self.style_repository = style_repository
         self.style_export_path = style_export_path
         self._sink = sink
+        self.account_provider = account_provider
+        self.identities = ConversationIdentityResolver(service.repository.database)
+
+    def _account_key(self):
+        if self.account_provider is None:
+            return None
+        key = self.account_provider()
+        if not key:
+            raise ValueError('QQ账号尚未确认；请登录后管理对应账号资料')
+        return key
+
+    def _target(self, value: str, *, allow_new_console=False) -> str:
+        return self.identities.resolve(value, account_key=self._account_key(), allow_new_console=allow_new_console)
 
     async def handle(self, line: str) -> bool:
         command = line.strip()
@@ -61,7 +76,7 @@ class AdminCommandHandler:
             self._show_memory(action, parts)
             return
         if action == "process" and len(parts) == 3:
-            report = await self.processor.process(parts[2], force=True)
+            report = await self.processor.process(self._target(parts[2]), force=True)
             self._sink(
                 f"[记忆维护] summary={report.summary_id} "
                 f"candidates={len(report.candidate_ids)} "
@@ -75,7 +90,7 @@ class AdminCommandHandler:
         repository = self.service.repository
         if action == "list" and len(parts) in {3, 4}:
             status = None if len(parts) == 4 and parts[3] == "all" else "active"
-            memories = repository.list_memories(parts[2], status=status)
+            memories = repository.list_memories(self._target(parts[2]), status=status)
             if not memories:
                 self._sink("[记忆] 没有符合条件的记录")
                 return
@@ -102,7 +117,7 @@ class AdminCommandHandler:
             )
             return
         if action == "summary" and len(parts) == 3:
-            summary = repository.latest_summary(parts[2])
+            summary = repository.latest_summary(self._target(parts[2]))
             if summary is None:
                 self._sink("[摘要] 暂无")
             else:
@@ -113,7 +128,7 @@ class AdminCommandHandler:
                 )
             return
         if action == "candidates" and len(parts) == 3:
-            candidates = repository.list_candidates(parts[2], status=None)
+            candidates = repository.list_candidates(self._target(parts[2]), status=None)
             if not candidates:
                 self._sink("[候选] 暂无")
                 return
@@ -128,7 +143,7 @@ class AdminCommandHandler:
         if action == "messages" and len(parts) in {3, 4}:
             limit = int(parts[3]) if len(parts) == 4 else 20
             messages = repository.database.list_recent_stored_messages(
-                parts[2], limit=limit
+                self._target(parts[2]), limit=limit
             )
             if not messages:
                 self._sink("[原始消息] 暂无")
@@ -165,7 +180,7 @@ class AdminCommandHandler:
                     "<source_ids> <内容>"
                 )
             candidate, memory = self.service.add_manual_memory(
-                conversation_id=parts[2],
+                conversation_id=self._target(parts[2]),
                 memory_type=parts[3],
                 memory_key=parts[4],
                 source_message_ids=self._source_ids(parts[5]),
@@ -223,7 +238,7 @@ class AdminCommandHandler:
     def _profile(self, command: str) -> None:
         parts = command.split(maxsplit=4)
         if len(parts) == 3 and parts[1].lower() == "show":
-            profile = self.service.repository.get_contact_profile(parts[2])
+            profile = self.service.repository.get_contact_profile(self._target(parts[2]))
             if profile is None:
                 self._sink(f"[联系人画像] {parts[2]} 暂无已配置字段")
                 return
@@ -237,7 +252,7 @@ class AdminCommandHandler:
             )
             return
         if len(parts) == 5 and parts[1].lower() == "set":
-            profile = self.service.set_contact_profile(parts[2], parts[3], parts[4])
+            profile = self.service.set_contact_profile(self._target(parts[2], allow_new_console=True), parts[3], parts[4])
             self._sink(f"[联系人画像] {profile.contact_id} 的 {parts[3]} 已更新")
             return
         raise ValueError("用法：/profile show <联系人> 或 /profile set <联系人> <field> <内容>")
@@ -245,21 +260,23 @@ class AdminCommandHandler:
     def _account(self, command: str) -> None:
         parts = command.split(maxsplit=3)
         if len(parts) == 2 and parts[1].lower() == "show":
-            profile = self.service.repository.get_account_profile()
+            profile = self.service.repository.get_account_profile(self._account_key())
             if profile is None:
                 self._sink("[当前账号资料] 暂无已配置字段")
                 return
             private_state = "已配置（内容隐藏）" if profile.private_information else "-"
+            image_state = "已配置（路径隐藏）" if profile.public_image_path else "-"
             self._sink(
                 "[当前账号资料]\n"
                 f"对外称呼：{profile.public_name or '-'}\n"
                 f"基础背景：{profile.background or '-'}\n"
                 f"可公开信息：{profile.public_information or '-'}\n"
+                f"资料图：{image_state}\n"
                 f"不应主动透露：{private_state}"
             )
             return
         if len(parts) == 4 and parts[1].lower() == "set":
-            self.service.set_account_profile(parts[2], parts[3])
+            self.service.set_account_profile(parts[2], parts[3], account_key=self._account_key())
             self._sink(f"[当前账号资料] {parts[2]} 已更新")
             return
         raise ValueError("用法：/account show 或 /account set <field> <内容>")
@@ -332,7 +349,9 @@ class AdminCommandHandler:
     @staticmethod
     def memory_help() -> str:
         return (
-            "记忆命令：\n/memory list <联系人> [all]\n"
+            "联系人参数：优先复制会话页管理标识，例如 scope:qq:账号:qq:private:联系人QQ。\n"
+            "QQ号/昵称仅在当前账号中唯一且已知时可用；歧义或目标不存在会报错。\n"
+            "记忆命令（仅本地管理CLI，外部聊天不会执行）：\n/memory list <联系人> [all]\n"
             "/memory show <memory_id>\n/memory summary <联系人>\n"
             "/memory candidates <联系人>\n/memory messages <联系人> [limit]\n"
             "/memory process <联系人>\n"

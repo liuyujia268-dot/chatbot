@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from typing import Any, Protocol
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -17,6 +18,7 @@ from app.models.base import (
     ModelAuthenticationError,
     ModelConnectionError,
     ModelNotFoundError,
+    ModelNetworkConfigurationError,
     ModelServiceError,
     ModelTimeoutError,
 )
@@ -41,6 +43,8 @@ class OpenAICompatibleModel(ChatModel):
         timeout_seconds: float,
         max_output_tokens: int,
         temperature: float | None = None,
+        proxy_mode: str = "system",
+        proxy_url: str | None = None,
         client: AsyncHTTPClient | None = None,
     ) -> None:
         self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
@@ -49,6 +53,8 @@ class OpenAICompatibleModel(ChatModel):
         self._timeout_seconds = timeout_seconds
         self._max_output_tokens = max_output_tokens
         self._temperature = temperature
+        self._proxy_mode = proxy_mode
+        self._proxy_url = proxy_url
         self._client = client
 
     async def generate(self, messages: Sequence[Message]) -> str:
@@ -76,31 +82,42 @@ class OpenAICompatibleModel(ChatModel):
                 response = await self._post(payload, headers)
         except asyncio.CancelledError:
             raise
-        except (TimeoutError, httpx.TimeoutException) as exc:
+        except (TimeoutError, httpx.TimeoutException):
             logger.warning(
                 "model_timeout provider=openai_compatible model=%s timeout=%s",
                 self._model_name,
                 self._timeout_seconds,
             )
-            raise ModelTimeoutError("模型请求超时，请稍后重试。") from exc
+            raise ModelTimeoutError("模型请求超时，请稍后重试。") from None
+        except (ImportError, ValueError, OSError) as exc:
+            # Client construction can fail before post() (SOCKS/CA/proxy URL).
+            # Never log the raw exception: proxy credentials may be inside it.
+            logger.warning(
+                "model_network_configuration_failed proxy_mode=%s error_type=%s",
+                self._proxy_mode, type(exc).__name__,
+            )
+            raise ModelNetworkConfigurationError(
+                "模型网络配置失败；请在设置检查模型网络模式和代理地址。"
+                "SOCKS 组件缺失时请使用完整新版发行包；可直连时选择 direct 后重连。"
+            ) from None
         except httpx.ConnectError as exc:
             logger.warning(
-                "model_connection_failed provider=openai_compatible model=%s endpoint=%s",
+                "model_connection_failed provider=openai_compatible model=%s endpoint=%s error_type=%s",
                 self._model_name,
                 self._endpoint,
-                exc_info=True,
+                type(exc).__name__,
             )
             raise ModelConnectionError(
                 "无法连接模型服务，请确认服务已启动且地址正确。"
-            ) from exc
+            ) from None
         except httpx.RequestError as exc:
             logger.warning(
-                "model_request_failed provider=openai_compatible model=%s endpoint=%s",
+                "model_request_failed provider=openai_compatible model=%s endpoint=%s error_type=%s",
                 self._model_name,
                 self._endpoint,
-                exc_info=True,
+                type(exc).__name__,
             )
-            raise ModelConnectionError("模型服务请求失败，请检查网络和服务地址。") from exc
+            raise ModelConnectionError("模型服务请求失败，请检查网络和服务地址。") from None
 
         self._raise_for_status(response)
         return self._parse_content(response)
@@ -113,7 +130,14 @@ class OpenAICompatibleModel(ChatModel):
                 headers=headers,
                 timeout=self._timeout_seconds,
             )
-        async with httpx.AsyncClient() as client:
+        if self._proxy_mode not in {"system", "direct", "custom"}:
+            raise ValueError("Unknown model proxy mode")
+        options: dict[str, Any] = {"trust_env": self._proxy_mode == "system"}
+        if self._proxy_mode == "custom":
+            if not self._proxy_url:
+                raise ValueError("Custom model proxy is missing")
+            options["proxy"] = self._proxy_url
+        async with httpx.AsyncClient(**options) as client:
             return await client.post(
                 self._endpoint,
                 json=payload,
@@ -153,7 +177,19 @@ class OpenAICompatibleModel(ChatModel):
                 detail = str(error)
         except (ValueError, TypeError, AttributeError):
             detail = str(getattr(response, "text", ""))
-        return detail.replace(self._api_key, "***")[:500]
+        secrets = [self._api_key, self._proxy_url]
+        if self._proxy_url:
+            try:
+                proxy = urlsplit(self._proxy_url)
+                for credential in (proxy.username, proxy.password):
+                    if credential:
+                        secrets.extend((credential, unquote(credential)))
+            except ValueError:
+                pass
+        for secret in secrets:
+            if secret:
+                detail = detail.replace(secret, "***")
+        return detail[:500]
 
     @staticmethod
     def _parse_content(response: Any) -> str:

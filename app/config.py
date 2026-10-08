@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,8 @@ def _parse_float(
         parsed = float(value)
     except ValueError as exc:
         raise ConfigurationError(f"{name} 必须是数字") from exc
+    if not math.isfinite(parsed):
+        raise ConfigurationError(f"{name} 必须是有限数字")
     if parsed < minimum:
         raise ConfigurationError(f"{name} 必须大于或等于 {minimum}")
     if maximum_exclusive is not None and parsed >= maximum_exclusive:
@@ -115,6 +118,8 @@ class Settings:
     model_base_url: str | None = None
     model_api_key: str | None = field(default=None, repr=False)
     model_name: str | None = None
+    model_proxy_mode: str = "system"
+    model_proxy_url: str | None = field(default=None, repr=False)
     model_timeout_seconds: float = 60.0
     model_temperature: float | None = 0.7
     model_max_tokens: int = 256
@@ -128,6 +133,7 @@ class Settings:
     memory_extraction_interval_messages: int = 12
     summary_trigger_messages: int = 24
     memory_processing_batch_messages: int = 40
+    memory_failure_retry_seconds: float = 300.0
     memory_confidence_threshold: float = 0.85
     memory_context_limit: int = 6
     memory_context_fallback: int = 2
@@ -148,6 +154,7 @@ class Settings:
     qq_primary_contact_name: str = "宇飞"
     qq_admin_contact_ids: tuple[str, ...] = ()
     qq_admin_memory_prefix: str = "#指令"
+    qq_admin_config_prefix: str = "#配置"
     qq_training_group_ids: tuple[str, ...] = ()
     qq_reply_group_ids: tuple[str, ...] = ()
     qq_dry_run: bool = True
@@ -155,12 +162,12 @@ class Settings:
     qq_proactive_enabled: bool = False
     qq_proactive_contact_ids: tuple[str, ...] = ()
     qq_proactive_exclude_contact_ids: tuple[str, ...] = ()
-    qq_proactive_min_seconds: float = 2400.0
-    qq_proactive_max_seconds: float = 4800.0
-    qq_proactive_daily_limit: int = 3
+    qq_proactive_min_seconds: float = 1800.0
+    qq_proactive_max_seconds: float = 3600.0
+    qq_proactive_daily_limit: int = 0
     qq_proactive_recent_days: int = 7
-    qq_proactive_quiet_start: str = "00:00"
-    qq_proactive_quiet_end: str = "08:00"
+    qq_proactive_quiet_start: str = "23:59"
+    qq_proactive_quiet_end: str = "07:00"
     proactive_prompt_path: Path = (
         PROJECT_ROOT / "app" / "prompts" / "proactive.txt"
     )
@@ -195,6 +202,11 @@ class Settings:
     def model_max_output_tokens(self) -> int:
         """Compatibility alias for the previous token setting."""
         return self.model_max_tokens
+
+    @classmethod
+    def from_values(cls, values: Mapping[str, str]) -> "Settings":
+        """Validate one complete map without reading the live .env/process env."""
+        return cls.from_env(env_file=Path(os.devnull), environ=values)
 
     @classmethod
     def from_env(
@@ -249,6 +261,27 @@ class Settings:
             ):
                 raise ConfigurationError("MODEL_BASE_URL 必须是安全的 HTTP(S) 基础地址")
 
+        proxy_mode = get("MODEL_PROXY_MODE", "system").lower()
+        proxy_url = get("MODEL_PROXY_URL") or None
+        if proxy_mode not in {"system", "direct", "custom"}:
+            raise ConfigurationError("MODEL_PROXY_MODE 只支持 system、direct 或 custom")
+        if proxy_mode == "custom":
+            try:
+                parsed_proxy = urlsplit(proxy_url or "")
+                valid_proxy = (
+                    parsed_proxy.scheme in {"http", "https", "socks5", "socks5h"}
+                    and bool(parsed_proxy.hostname)
+                    and (parsed_proxy.port is None or 0 < parsed_proxy.port < 65536)
+                    and parsed_proxy.path in {"", "/"}
+                    and not parsed_proxy.query
+                    and not parsed_proxy.fragment
+                    and not any(character.isspace() for character in (proxy_url or ""))
+                )
+            except ValueError:
+                valid_proxy = False
+            if not valid_proxy:
+                raise ConfigurationError("MODEL_PROXY_URL 必须是有效的 HTTP(S) 或 SOCKS5 代理地址")
+
         temperature_value = get("MODEL_TEMPERATURE", "0.7")
         qq_enabled = _parse_bool("QQ_ENABLED", get("QQ_ENABLED", "false"))
         qq_dry_run = _parse_bool("QQ_DRY_RUN", get("QQ_DRY_RUN", "true"))
@@ -292,12 +325,12 @@ class Settings:
             )
         proactive_min = _parse_float(
             "QQ_PROACTIVE_MIN_SECONDS",
-            get("QQ_PROACTIVE_MIN_SECONDS", "2400"),
+            get("QQ_PROACTIVE_MIN_SECONDS", "1800"),
             minimum=1,
         )
         proactive_max = _parse_float(
             "QQ_PROACTIVE_MAX_SECONDS",
-            get("QQ_PROACTIVE_MAX_SECONDS", "4800"),
+            get("QQ_PROACTIVE_MAX_SECONDS", "3600"),
             minimum=1,
         )
         if proactive_min > proactive_max:
@@ -338,6 +371,8 @@ class Settings:
             model_base_url=base_url,
             model_api_key=api_key,
             model_name=model_name,
+            model_proxy_mode=proxy_mode,
+            model_proxy_url=proxy_url,
             model_timeout_seconds=_parse_float(
                 "MODEL_TIMEOUT_SECONDS", get("MODEL_TIMEOUT_SECONDS", "60"), minimum=0.1
             ),
@@ -394,6 +429,11 @@ class Settings:
                 "MEMORY_PROCESSING_BATCH_MESSAGES",
                 get("MEMORY_PROCESSING_BATCH_MESSAGES", "40"),
             ),
+            memory_failure_retry_seconds=_parse_float(
+                "MEMORY_FAILURE_RETRY_SECONDS",
+                get("MEMORY_FAILURE_RETRY_SECONDS", "300"),
+                minimum=1,
+            ),
             memory_confidence_threshold=_parse_confidence(
                 "MEMORY_CONFIDENCE_THRESHOLD",
                 get("MEMORY_CONFIDENCE_THRESHOLD", "0.85"),
@@ -437,6 +477,9 @@ class Settings:
             qq_admin_memory_prefix=(
                 get("QQ_ADMIN_MEMORY_PREFIX", "#指令") or "#指令"
             ),
+            qq_admin_config_prefix=(
+                get("QQ_ADMIN_CONFIG_PREFIX", "#配置") or "#配置"
+            ),
             qq_training_group_ids=training_group_ids,
             qq_reply_group_ids=reply_group_ids,
             qq_dry_run=qq_dry_run,
@@ -462,7 +505,8 @@ class Settings:
             qq_proactive_max_seconds=proactive_max,
             qq_proactive_daily_limit=_parse_int(
                 "QQ_PROACTIVE_DAILY_LIMIT",
-                get("QQ_PROACTIVE_DAILY_LIMIT", "3"),
+                get("QQ_PROACTIVE_DAILY_LIMIT", "0"),
+                minimum=0,
             ),
             qq_proactive_recent_days=_parse_int(
                 "QQ_PROACTIVE_RECENT_DAYS",
@@ -470,11 +514,11 @@ class Settings:
             ),
             qq_proactive_quiet_start=_parse_hhmm(
                 "QQ_PROACTIVE_QUIET_START",
-                get("QQ_PROACTIVE_QUIET_START", "00:00"),
+                get("QQ_PROACTIVE_QUIET_START", "23:59"),
             ),
             qq_proactive_quiet_end=_parse_hhmm(
                 "QQ_PROACTIVE_QUIET_END",
-                get("QQ_PROACTIVE_QUIET_END", "08:00"),
+                get("QQ_PROACTIVE_QUIET_END", "07:00"),
             ),
             proactive_prompt_path=_project_path(
                 get("PROACTIVE_PROMPT_PATH", "app/prompts/proactive.txt")

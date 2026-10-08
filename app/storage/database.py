@@ -33,6 +33,12 @@ class Database:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA_SQL)
+            message_columns = {row['name'] for row in connection.execute('PRAGMA table_info(messages)')}
+            if 'history_kind' not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN history_kind TEXT NOT NULL DEFAULT 'legacy_unknown'")
+                connection.execute("UPDATE messages SET history_kind='real' WHERE role='user'")
+            if 'platform_event_id' not in message_columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN platform_event_id INTEGER")
             columns = {
                 row["name"]
                 for row in connection.execute(
@@ -44,12 +50,23 @@ class Database:
                     "ALTER TABLE inbound_platform_messages "
                     "ADD COLUMN parts_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            account_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(current_account_profile)"
+                ).fetchall()
+            }
+            if "public_image_path" not in account_columns:
+                connection.execute(
+                    "ALTER TABLE current_account_profile "
+                    "ADD COLUMN public_image_path TEXT"
+                )
 
-    def save_message(self, session_id: str, message: Message) -> int:
+    def save_message(self, session_id: str, message: Message, *, history_kind: str = "real") -> int:
         with self.connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                (session_id, message.role, message.content),
+                "INSERT INTO messages (session_id, role, content, history_kind) VALUES (?, ?, ?, ?)",
+                (session_id, message.role, message.content, history_kind),
             )
             return int(cursor.lastrowid)
 
@@ -108,15 +125,45 @@ class Database:
                 return False
             if save_as_chat_message:
                 connection.execute(
-                    "INSERT INTO messages (session_id, role, content) "
-                    "VALUES (?, ?, ?)",
+                    "INSERT INTO messages (session_id, role, content, history_kind, platform_event_id) "
+                    "VALUES (?, ?, ?, 'real', ?)",
                     (
-                        message.conversation_id,
+                        message.session_id,
                         chat_role,
                         message.storage_text,
+                        cursor.lastrowid,
                     ),
                 )
         return True
+
+    def get_human_takeover(self, session_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT human_takeover FROM conversation_controls WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return bool(row[0]) if row else False
+
+    def update_platform_content(self, message: PlatformMessage) -> None:
+        """Resolve media in place; never change the registered arrival ID/order."""
+        with self.connect() as conn:
+            row = conn.execute('SELECT id FROM inbound_platform_messages WHERE platform=? AND account_id=? AND message_id=?',
+                               message.deduplication_key).fetchone()
+            if row is None:
+                return
+            conn.execute('UPDATE inbound_platform_messages SET text=?,parts_json=? WHERE id=?',
+                         (message.storage_text, self.serialize_message_parts(message), row[0]))
+            conn.execute('UPDATE messages SET content=? WHERE session_id=? AND platform_event_id=?',
+                         (message.storage_text, message.session_id, row[0]))
+
+    def set_human_takeover(self, session_id: str, enabled: bool) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO conversation_controls (session_id, human_takeover) "
+                "VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+                "human_takeover = excluded.human_takeover",
+                (session_id, int(enabled)),
+            )
 
     def list_recent_private_contacts(
         self,
@@ -166,13 +213,15 @@ class Database:
         session_id: str,
         *,
         limit: int | None = None,
+        include_simulated: bool = False,
     ) -> list[Message]:
         with self.connect() as connection:
             if limit is None:
                 rows = connection.execute(
                     "SELECT role, content FROM messages "
-                    "WHERE session_id = ? ORDER BY id",
-                    (session_id,),
+                    "WHERE session_id = ? AND (history_kind = 'real' OR (history_kind = 'simulated' AND ? = 1) "
+                    "OR session_id NOT LIKE 'scope:%') ORDER BY id",
+                    (session_id, int(include_simulated or not session_id.startswith('scope:'))),
                 ).fetchall()
             else:
                 if limit < 1:
@@ -180,9 +229,10 @@ class Database:
                 rows = connection.execute(
                     "SELECT role, content FROM ("
                     "SELECT id, role, content FROM messages "
-                    "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
+                    "WHERE session_id = ? AND (history_kind = 'real' OR (history_kind = 'simulated' AND ? = 1) "
+                    "OR session_id NOT LIKE 'scope:%') ORDER BY id DESC LIMIT ?"
                     ") ORDER BY id",
-                    (session_id, limit),
+                    (session_id, int(include_simulated or not session_id.startswith('scope:')), limit),
                 ).fetchall()
         return [Message(role=role, content=content) for role, content in rows]
 
@@ -226,6 +276,165 @@ class Database:
             ).fetchone()
         return str(row["description"]) if row is not None else None
 
+    def purge_group_data(self, *, platform: str = "qq") -> dict[str, int]:
+        """Delete group-derived records while preserving all private data."""
+
+        group_pattern = f"{platform}:group:%"
+        deleted: dict[str, int] = {}
+        with self.connect() as connection:
+            tables = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            def remove(
+                label: str,
+                statement: str,
+                parameters: tuple[object, ...],
+            ) -> None:
+                cursor = connection.execute(statement, parameters)
+                deleted[label] = max(0, int(cursor.rowcount))
+
+            remove(
+                "image_descriptions",
+                "DELETE FROM image_descriptions AS images "
+                "WHERE images.platform = ? AND EXISTS ("
+                "SELECT 1 FROM inbound_platform_messages AS events "
+                "WHERE events.platform = images.platform "
+                "AND events.account_id = images.account_id "
+                "AND events.message_id = images.message_id "
+                "AND events.conversation_id LIKE ?)",
+                (platform, group_pattern),
+            )
+            remove(
+                "style_samples",
+                "DELETE FROM style_samples WHERE platform = ? "
+                "AND (conversation_type = 'group' OR conversation_id LIKE ?)",
+                (platform, group_pattern),
+            )
+            remove(
+                "qq_training_group_events",
+                "DELETE FROM qq_training_group_events WHERE platform = ?",
+                (platform,),
+            )
+            for table, column in (
+                ("conversation_summaries", "conversation_id"),
+                ("memory_candidates", "conversation_id"),
+                ("long_term_memories", "conversation_id"),
+                ("contact_profiles", "contact_id"),
+                ("memory_processing_state", "conversation_id"),
+                ("messages", "session_id"),
+            ):
+                remove(
+                    table,
+                    f"DELETE FROM {table} WHERE {column} LIKE ?",
+                    (group_pattern,),
+                )
+            remove(
+                "inbound_platform_messages",
+                "DELETE FROM inbound_platform_messages "
+                "WHERE platform = ? AND conversation_id LIKE ?",
+                (platform, group_pattern),
+            )
+            if "desktop_messages" in tables:
+                remove(
+                    "desktop_messages",
+                    "DELETE FROM desktop_messages "
+                    "WHERE platform = ? AND conversation_id LIKE ?",
+                    (platform, group_pattern),
+                )
+            if "desktop_conversations" in tables:
+                remove(
+                    "desktop_conversations",
+                    "DELETE FROM desktop_conversations WHERE platform = ? "
+                    "AND (conversation_type = 'group' OR conversation_id LIKE ?)",
+                    (platform, group_pattern),
+                )
+        return deleted
+
+    def purge_self_private_data(
+        self,
+        account_id: str,
+        *,
+        platform: str = "qq",
+    ) -> dict[str, int]:
+        """Remove the invalid private conversation whose peer is self."""
+        clean_account_id = account_id.strip()
+        if not clean_account_id:
+            raise ValueError("account_id must not be empty")
+        conversation_id = f"{platform}:private:{clean_account_id}"
+        deleted: dict[str, int] = {}
+        with self.connect() as connection:
+            tables = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            def remove(
+                table: str,
+                statement: str,
+                parameters: tuple[object, ...],
+            ) -> None:
+                if table not in tables:
+                    deleted[table] = 0
+                    return
+                cursor = connection.execute(statement, parameters)
+                deleted[table] = max(0, int(cursor.rowcount))
+
+            remove(
+                "image_descriptions",
+                "DELETE FROM image_descriptions AS images "
+                "WHERE images.platform = ? AND images.account_id = ? "
+                "AND EXISTS (SELECT 1 FROM inbound_platform_messages AS events "
+                "WHERE events.platform = images.platform "
+                "AND events.account_id = images.account_id "
+                "AND events.message_id = images.message_id "
+                "AND events.conversation_id = ?)",
+                (platform, clean_account_id, conversation_id),
+            )
+            remove(
+                "style_samples",
+                "DELETE FROM style_samples WHERE platform = ? "
+                "AND conversation_id = ?",
+                (platform, conversation_id),
+            )
+            for table, column in (
+                ("conversation_summaries", "conversation_id"),
+                ("memory_candidates", "conversation_id"),
+                ("long_term_memories", "conversation_id"),
+                ("contact_profiles", "contact_id"),
+                ("memory_processing_state", "conversation_id"),
+                ("messages", "session_id"),
+            ):
+                remove(
+                    table,
+                    f"DELETE FROM {table} WHERE {column} = ?",
+                    (conversation_id,),
+                )
+            remove(
+                "inbound_platform_messages",
+                "DELETE FROM inbound_platform_messages WHERE platform = ? "
+                "AND account_id = ? AND conversation_id = ?",
+                (platform, clean_account_id, conversation_id),
+            )
+            remove(
+                "desktop_messages",
+                "DELETE FROM desktop_messages WHERE platform = ? "
+                "AND account_id = ? AND conversation_id = ?",
+                (platform, clean_account_id, conversation_id),
+            )
+            remove(
+                "desktop_conversations",
+                "DELETE FROM desktop_conversations WHERE platform = ? "
+                "AND account_id = ? AND conversation_id = ?",
+                (platform, clean_account_id, conversation_id),
+            )
+        return deleted
+
     def list_stored_messages(
         self,
         session_id: str,
@@ -235,7 +444,8 @@ class Database:
     ) -> list[StoredMessage]:
         query = (
             "SELECT id, session_id, role, content, created_at FROM messages "
-            "WHERE session_id = ? AND id > ? ORDER BY id"
+            "WHERE session_id = ? AND id > ? AND "
+            "(history_kind = 'real' OR session_id NOT LIKE 'scope:%') ORDER BY id"
         )
         parameters: tuple[object, ...] = (session_id, after_id)
         if limit is not None:
@@ -258,7 +468,8 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute(
                 "SELECT id, session_id, role, content, created_at FROM messages "
-                f"WHERE session_id = ? AND id IN ({placeholders}) ORDER BY id",
+                f"WHERE session_id = ? AND id IN ({placeholders}) AND "
+                "(history_kind = 'real' OR session_id NOT LIKE 'scope:%') ORDER BY id",
                 (session_id, *message_ids),
             ).fetchall()
         return [self._stored_message(row) for row in rows]
@@ -275,7 +486,7 @@ class Database:
             rows = connection.execute(
                 "SELECT id, session_id, role, content, created_at FROM ("
                 "SELECT id, session_id, role, content, created_at FROM messages "
-                "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
+                "WHERE session_id = ? AND (history_kind = 'real' OR session_id NOT LIKE 'scope:%') ORDER BY id DESC LIMIT ?"
                 ") ORDER BY id",
                 (session_id, limit),
             ).fetchall()
@@ -285,7 +496,7 @@ class Database:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS total FROM messages "
-                "WHERE session_id = ? AND id > ?",
+                "WHERE session_id = ? AND id > ? AND (history_kind = 'real' OR session_id NOT LIKE 'scope:%')",
                 (session_id, message_id),
             ).fetchone()
         return int(row["total"])
@@ -294,7 +505,7 @@ class Database:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT COALESCE(MAX(id), 0) AS latest FROM messages "
-                "WHERE session_id = ?",
+                "WHERE session_id = ? AND (history_kind = 'real' OR session_id NOT LIKE 'scope:%')",
                 (session_id,),
             ).fetchone()
         return int(row["latest"])

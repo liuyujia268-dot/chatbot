@@ -16,6 +16,10 @@ class ModelConnectionError(ModelError):
     """The configured model service could not be reached."""
 
 
+class ModelNetworkConfigurationError(ModelError):
+    """The model's proxy or local network dependencies are misconfigured."""
+
+
 class ModelTimeoutError(ModelError):
     """The model call exceeded its configured timeout."""
 

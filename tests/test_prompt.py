@@ -31,3 +31,13 @@ def test_memory_maintenance_prompt_loads_from_independent_file() -> None:
     assert "source_message_ids" in prompt
     assert "JSON" in prompt
     assert "不要" in prompt
+
+
+def test_followup_prompt_requires_a_distinct_second_message() -> None:
+    prompt = load_system_prompt(
+        PROJECT_ROOT / "app" / "prompts" / "followup.txt"
+    )
+
+    assert "不同的作用" in prompt
+    assert "同义词机械改写" in prompt
+    assert "[[NO_FOLLOWUP]]" in prompt

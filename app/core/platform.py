@@ -7,6 +7,8 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, Mapping
 
+from app.core.identity import conversation_key
+
 
 @dataclass(frozen=True, slots=True)
 class MessagePart:
@@ -90,6 +92,10 @@ class PlatformMessage:
         return self.platform, self.account_id, self.message_id
 
     @property
+    def session_id(self) -> str:
+        return conversation_key(self.platform, self.account_id, self.conversation_id)
+
+    @property
     def storage_text(self) -> str:
         return "\n".join(part.fallback_text for part in self.parts)
 
@@ -105,6 +111,10 @@ class OutboundMessage:
     conversation_id: str
     text: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def session_id(self) -> str:
+        return conversation_key(self.platform, self.account_id, self.conversation_id)
 
     def __post_init__(self) -> None:
         if not self.platform.strip() or not self.account_id.strip():

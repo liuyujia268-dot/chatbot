@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.core.identity import account_key_for
+
 import re
 from typing import Any
 
@@ -57,7 +59,7 @@ class MemoryService:
             summary=self.repository.latest_summary(conversation_id),
             memories=memories,
             contact_profile=self.repository.get_contact_profile(conversation_id),
-            account_profile=self.repository.get_account_profile(),
+            account_profile=self.repository.get_account_profile(account_key_for(conversation_id)),
         )
 
     def select_relevant_memories(
@@ -284,11 +286,12 @@ class MemoryService:
             {"kind": "manual", "reference": "cli"},
         )
 
-    def set_account_profile(self, field_name: str, value: str):
+    def set_account_profile(self, field_name: str, value: str, account_key: str | None = None):
         if field_name not in ACCOUNT_PROFILE_FIELDS:
             raise ValueError("unsupported account profile field")
         return self.repository.set_account_profile_field(
             field_name,
             value,
             {"kind": "manual", "reference": "cli"},
+            account_key=account_key,
         )

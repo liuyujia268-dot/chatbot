@@ -52,6 +52,9 @@ def test_profile_account_and_debug_commands_are_human_controlled(tmp_path: Path)
         await handler.handle("/profile set 张三 relationship 熟悉的朋友")
         await handler.handle("/profile show 张三")
         await handler.handle("/account set private_information 不要透露住址")
+        await handler.handle(
+            "/account set public_image_path app/assets/whale_girl_profile.jpg"
+        )
         await handler.handle("/account show")
         await handler.handle("/debug on")
 
@@ -62,6 +65,8 @@ def test_profile_account_and_debug_commands_are_human_controlled(tmp_path: Path)
             if line.startswith("[当前账号资料]") and "\n" in line
         )
         assert "不要透露住址" not in account
+        assert "app/assets/whale_girl_profile.jpg" not in account
+        assert "资料图：已配置（路径隐藏）" in account
         assert "内容隐藏" in account
         assert handler.debugger.enabled is True
 

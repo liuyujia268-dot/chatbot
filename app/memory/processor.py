@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+import time
+from typing import Any, Callable
+
+from app.core.identity import account_key_for
 
 from app.core.session import Message
 from app.memory.context import redact_private_information
@@ -104,14 +107,19 @@ class MemoryProcessor:
             previous_summary.content if previous_summary else None,
             summary_due,
         )
-        account_profile = repository.get_account_profile()
+        account_profile = repository.get_account_profile(account_key_for(conversation_id))
         private_information = (
             account_profile.private_information if account_profile else None
         )
         request_messages = (
             Message(
                 "system",
-                redact_private_information(self._prompt, private_information),
+                redact_private_information(
+                    self._prompt + "\n输出只允许一个 JSON 对象，必须包含 summary 和 candidates。"
+                    "输入 summary_required=true 时，summary 必须是非空中文字符串；"
+                    "否则可以为 null。candidates 必须为数组，无可靠候选时返回 []。",
+                    private_information,
+                ),
             ),
             Message(
                 "user",
@@ -125,32 +133,36 @@ class MemoryProcessor:
         output = self._parse_output(raw)
 
         summary_id: int | None = None
+        summary_missing = False
         if summary_due:
             summary_content = output.get("summary")
             if not isinstance(summary_content, str) or not summary_content.strip():
-                raise ValueError("maintenance response omitted required summary")
-            assert summary_messages
-            summary = repository.add_summary(
-                conversation_id=conversation_id,
-                content=summary_content,
-                start_message_id=(
-                    previous_summary.start_message_id
-                    if previous_summary
-                    else summary_messages[0].id
-                ),
-                end_message_id=summary_messages[-1].id,
-                previous_summary_id=(
-                    previous_summary.id if previous_summary else None
-                ),
-            )
-            summary_id = summary.id
+                # Do not invent a summary, advance its range, or discard valid
+                # candidates just because an optional background result failed.
+                summary_missing = True
+            else:
+                assert summary_messages
+                summary = repository.add_summary(
+                    conversation_id=conversation_id,
+                    content=summary_content,
+                    start_message_id=(
+                        previous_summary.start_message_id
+                        if previous_summary
+                        else summary_messages[0].id
+                    ),
+                    end_message_id=summary_messages[-1].id,
+                    previous_summary_id=(
+                        previous_summary.id if previous_summary else None
+                    ),
+                )
+                summary_id = summary.id
 
         candidate_ids: list[int] = []
         accepted_ids: list[int] = []
         for item in output.get("candidates", []):
             try:
                 proposal = self._proposal(conversation_id, item)
-            except (TypeError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 logger.warning(
                     "invalid_memory_candidate conversation=%s",
                     conversation_id,
@@ -179,6 +191,7 @@ class MemoryProcessor:
             summary_id=summary_id,
             candidate_ids=tuple(candidate_ids),
             accepted_memory_ids=tuple(accepted_ids),
+            skipped_reason="summary_missing" if summary_missing else None,
         )
 
     def _build_payload(
@@ -300,12 +313,21 @@ class MemoryMaintenanceCoordinator:
         processor: MemoryProcessor,
         *,
         enabled: bool = True,
+        failure_retry_seconds: float = 300.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.processor = processor
         self.enabled = enabled
+        if failure_retry_seconds <= 0:
+            raise ValueError("memory failure retry delay must be positive")
+        self._failure_retry_seconds = failure_retry_seconds
+        self._clock = clock
+        self._retry_after: dict[str, float] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     def schedule(self, conversation_id: str) -> None:
+        if self._clock() < self._retry_after.get(conversation_id, 0):
+            return
         if not self.enabled or not self.processor.is_due(conversation_id):
             return
         existing = self._tasks.get(conversation_id)
@@ -317,6 +339,14 @@ class MemoryMaintenanceCoordinator:
     async def _run(self, conversation_id: str) -> None:
         try:
             report = await self.processor.process(conversation_id)
+            if report.skipped_reason == "summary_missing":
+                self._retry_after[conversation_id] = self._clock() + self._failure_retry_seconds
+                logger.warning(
+                    "memory_summary_missing conversation=%s retry_seconds=%s",
+                    conversation_id, self._failure_retry_seconds,
+                )
+            else:
+                self._retry_after.pop(conversation_id, None)
             logger.info(
                 "memory_maintenance_complete conversation=%s summary=%s "
                 "candidates=%s accepted=%s",
@@ -326,6 +356,7 @@ class MemoryMaintenanceCoordinator:
                 len(report.accepted_memory_ids),
             )
         except Exception:
+            self._retry_after[conversation_id] = self._clock() + self._failure_retry_seconds
             logger.exception(
                 "memory_maintenance_failed conversation=%s",
                 conversation_id,

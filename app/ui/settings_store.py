@@ -6,6 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Mapping
+from app.config import Settings, ConfigurationError, _read_env_file
 
 
 MODEL_SETTING_KEYS = (
@@ -13,6 +14,8 @@ MODEL_SETTING_KEYS = (
     "MODEL_BASE_URL",
     "MODEL_API_KEY",
     "MODEL_NAME",
+    "MODEL_PROXY_MODE",
+    "MODEL_PROXY_URL",
     "MODEL_TIMEOUT_SECONDS",
     "MODEL_TEMPERATURE",
     "MODEL_MAX_TOKENS",
@@ -26,6 +29,7 @@ QQ_SETTING_KEYS = (
     "QQ_WEBUI_TOKEN",
     "QQ_WEBUI_CONFIG_PATH",
     "QQ_WS_URL",
+    "QQ_WS_TOKEN",
     "QQ_AUTO_REPLY_ENABLED",
     "QQ_DRY_RUN",
     "QQ_PROACTIVE_ENABLED",
@@ -35,18 +39,20 @@ QQ_SETTING_KEYS = (
 
 
 def read_env_values(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key:
-            values[key] = value.strip()
-    return values
+    return _read_env_file(path)
+
+
+def validate_values(values: Mapping[str, str], updates: Mapping[str, str]) -> Settings:
+    for key, value in updates.items():
+        if '\n' in value or '\r' in value:
+            raise ConfigurationError(f'{key} 不能包含换行')
+    return Settings.from_values({**values, **updates})
+
+
+def save_validated_env(path: Path, updates: Mapping[str, str]) -> Settings:
+    settings = validate_values(read_env_values(path), updates)
+    update_env_file(path, updates)
+    return settings
 
 
 def update_env_file(path: Path, updates: Mapping[str, str]) -> None:
@@ -59,6 +65,7 @@ def update_env_file(path: Path, updates: Mapping[str, str]) -> None:
         else []
     )
     pending = {key: str(value) for key, value in updates.items()}
+    changed_keys = set(pending)
     result: list[str] = []
     for line in lines:
         stripped = line.strip()
@@ -66,6 +73,8 @@ def update_env_file(path: Path, updates: Mapping[str, str]) -> None:
             result.append(line)
             continue
         key = line.split("=", 1)[0].strip()
+        if key in changed_keys and key not in pending:
+            continue  # eliminate stale duplicate definitions of updated fields
         if key not in pending:
             result.append(line)
             continue

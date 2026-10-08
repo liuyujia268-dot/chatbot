@@ -437,7 +437,8 @@ def test_human_message_cancels_current_reply_but_next_message_auto_replies(
         dispatcher, _ = make_dispatcher(tmp_path / "chat.db", model)
         merger = ContinuousMessageMerger(dispatcher, debounce_seconds=0)
 
-        current = asyncio.create_task(merger.submit("qq:private:20002", "你在吗"))
+        session_id = "scope:qq:10001:qq:private:20002"
+        current = asyncio.create_task(merger.submit(session_id, "你在吗"))
         await asyncio.wait_for(model.started.wait(), timeout=1)
         recorded = merger.record_human_self_platform(
             PlatformMessage(
@@ -459,9 +460,9 @@ def test_human_message_cancels_current_reply_but_next_message_auto_replies(
         assert interrupted.reply is None
         assert interrupted.skip_reason == "stale"
         assert model.cancelled is True
-        assert merger.is_human_takeover("qq:private:20002") is False
+        assert merger.is_human_takeover(session_id) is False
 
-        next_result = await merger.submit("qq:private:20002", "下一条消息")
+        next_result = await merger.submit(session_id, "下一条消息")
 
         assert next_result is not None
         assert next_result.reply == "fresh reply"

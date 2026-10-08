@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from app.ui.napcat_webui import (
+    discover_webui_config,
     find_napcat_launcher,
     resolve_webui_launch,
     should_launch_webui,
@@ -150,3 +151,26 @@ def test_failed_or_incomplete_login_can_always_be_retried() -> None:
         opened=True,
         account_id="current-account",
     )
+
+
+def test_explicit_config_short_circuits_all_directory_search(tmp_path, monkeypatch):
+    config = tmp_path / 'webui.json'
+    config.write_text(json.dumps({'token': SECRET}), encoding='utf-8')
+    monkeypatch.setattr('app.ui.napcat_webui._default_roots', lambda: (_ for _ in ()).throw(AssertionError('no scan')))
+    monkeypatch.setattr(Path, 'glob', lambda *args: (_ for _ in ()).throw(AssertionError('no glob')))
+    assert discover_webui_config(explicit_config_path=config) == config
+
+
+def test_common_config_location_does_not_scan_unrelated_folders(tmp_path, monkeypatch):
+    config = tmp_path / 'NapCat.Shell' / 'config' / 'webui.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'token': SECRET}), encoding='utf-8')
+    monkeypatch.setattr(Path, 'glob', lambda *args: (_ for _ in ()).throw(AssertionError('no glob')))
+    assert discover_webui_config(search_roots=[tmp_path]) == config
+
+
+def test_running_webui_with_known_token_does_not_search_installation(monkeypatch):
+    monkeypatch.setattr('app.ui.napcat_webui.discover_webui_config', lambda **kwargs: (_ for _ in ()).throw(AssertionError('no disk search')))
+    launch = resolve_webui_launch('http://localhost:6099/webui', explicit_token=SECRET, discover_config=False)
+    assert launch.authenticated and launch.config_path is None
+    assert f'token={SECRET}' in launch.url

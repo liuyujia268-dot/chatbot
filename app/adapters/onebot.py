@@ -47,8 +47,12 @@ def parse_onebot_event(event: dict[str, Any]) -> ParsedQQEvent | None:
         peer_id = (
             _identifier(event.get("target_id"))
             or _identifier(event.get("peer_id"))
-            or peer_id
         )
+        if not peer_id or peer_id == account_id:
+            # NapCat occasionally reports a sent private event without its
+            # peer. Treating self_id as the peer creates a fake self-chat and
+            # later makes send_private_msg target the logged-in account.
+            return None
     sender_id = account_id if is_self else (declared_sender_id or event_user_id)
     conversation_id = (
         f"qq:group:{group_id}"

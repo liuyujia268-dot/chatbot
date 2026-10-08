@@ -29,6 +29,8 @@ def build_model(
             timeout_seconds=settings.model_timeout_seconds,
             max_output_tokens=settings.model_max_tokens,
             temperature=settings.model_temperature,
+            proxy_mode=settings.model_proxy_mode,
+            proxy_url=settings.model_proxy_url,
             client=client,
         )
     raise ConfigurationError(f"不支持的 MODEL_PROVIDER：{settings.model_provider}")

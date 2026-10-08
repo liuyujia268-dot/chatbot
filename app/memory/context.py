@@ -109,6 +109,11 @@ def _format_account_profile(profile: AccountProfile | None) -> str:
         lines.append(f"- 已配置基础背景：{profile.background}")
     if profile.public_information:
         lines.append(f"- 可公开信息：{profile.public_information}")
+    if profile.public_image_path:
+        lines.append(
+            "- 已配置可公开的鲸鱼娘资料图；对方明确索要本人资料、"
+            "形象或照片时，程序会随回复附图"
+        )
     if profile.private_information:
         lines.append(
             "- 已配置仅供程序保管的私密账号信息；"
@@ -184,9 +189,15 @@ class ContextDebugger:
         account = context.account_profile if context else None
         account_fields = [
             field
-            for field in ("public_name", "background", "public_information")
+            for field in (
+                "public_name",
+                "background",
+                "public_information",
+            )
             if account and getattr(account, field)
         ]
+        if account and account.public_image_path:
+            account_fields.append("public_image_path=<路径隐藏>")
         if account and account.private_information:
             account_fields.append("private_information=<内容隐藏>")
         lines.append("当前账号字段：" + (", ".join(account_fields) or "无"))

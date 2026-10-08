@@ -20,3 +20,6 @@ data/style_samples*.jsonl
 .vscode/
 *.lnk
 /gitee令牌.txt
+/release/*
+!/release/README.md
+/artifacts/releases/

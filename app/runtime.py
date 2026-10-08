@@ -77,6 +77,7 @@ def build_core_runtime(settings: Settings) -> CoreRuntime:
     )
     maintenance = MemoryMaintenanceCoordinator(
         memory_processor,
+        failure_retry_seconds=settings.memory_failure_retry_seconds,
         enabled=(
             settings.memory_auto_process_enabled
             and settings.model_provider != "mock"

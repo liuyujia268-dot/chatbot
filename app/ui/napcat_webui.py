@@ -38,16 +38,19 @@ def resolve_webui_launch(
     explicit_token: str | None = None,
     explicit_config_path: Path | None = None,
     search_roots: Iterable[Path] | None = None,
+    discover_config: bool = True,
 ) -> WebUiLaunch:
     """Add the WebUI token to *base_url* using a safe, documented precedence."""
 
     url_token = _query_token(base_url)
     token = (explicit_token or "").strip()
     source = "explicit" if token else ""
-    config_path = discover_webui_config(
-        explicit_config_path=explicit_config_path,
-        search_roots=search_roots,
-    )
+    config_path = None
+    if explicit_config_path is not None or discover_config or not (token or url_token):
+        config_path = discover_webui_config(
+            explicit_config_path=explicit_config_path,
+            search_roots=search_roots,
+        )
 
     if not token and url_token:
         token = url_token
@@ -78,41 +81,39 @@ def discover_webui_config(
 ) -> Path | None:
     """Find common NapCat Shell ``config/webui.json`` locations."""
 
-    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def usable(candidate: Path) -> bool:
+        key = str(candidate).casefold()
+        if key in seen:
+            return False
+        seen.add(key)
+        try:
+            return candidate.is_file() and bool(read_webui_token(candidate))
+        except OSError:
+            return False
+
+    # A known installation must not pay for scanning AppData/Program Files.
     if explicit_config_path is not None:
-        candidates.append(_as_config_file(explicit_config_path))
+        candidate = _as_config_file(explicit_config_path)
+        if usable(candidate):
+            return candidate
 
     roots = list(search_roots) if search_roots is not None else _default_roots()
     for root in roots:
-        candidates.extend(
-            (
-                root / "NapCat.Shell" / "config" / "webui.json",
-                root / "NapCatQQ" / "config" / "webui.json",
-                root / "NapCat" / "config" / "webui.json",
-                root / "config" / "webui.json",
-            )
-        )
-        if root.exists() and root.is_dir():
-            for pattern in (
-                "NapCat*/config/webui.json",
-                "*/NapCat*/config/webui.json",
-            ):
-                try:
-                    candidates.extend(root.glob(pattern))
-                except OSError:
-                    continue
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = str(candidate).casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if candidate.is_file() and read_webui_token(candidate):
+        for directory in ("NapCat.Shell", "NapCatQQ", "NapCat", ""):
+            candidate = root / directory / "config" / "webui.json"
+            if usable(candidate):
                 return candidate
-        except OSError:
-            continue
+    # Only use broad fallback searches after all inexpensive direct paths fail.
+    for root in roots:
+        for pattern in ("NapCat*/config/webui.json", "*/NapCat*/config/webui.json"):
+            try:
+                for candidate in root.glob(pattern):
+                    if usable(candidate):
+                        return candidate
+            except OSError:
+                continue
     return None
 
 
@@ -135,7 +136,10 @@ def find_napcat_launcher(config_path: Path | None) -> Path | None:
     if config_path is None:
         return None
     install_root = config_path.parent.parent
-    for name in ("launcher-user.bat", "launcher-win10-user.bat"):
+    names = ["launcher-user.bat", "launcher-win10-user.bat"]
+    if (install_root / "chatbot-bundle.json").is_file():
+        names.insert(0, "chatbot-launcher.cmd")
+    for name in names:
         candidate = install_root / name
         if candidate.is_file():
             return candidate
@@ -145,12 +149,12 @@ def find_napcat_launcher(config_path: Path | None) -> Path | None:
 def start_napcat_launcher(
     launcher_path: Path,
     *,
-    popen=subprocess.Popen,
+    popen=None,
 ) -> object:
     """Start NapCat without a visible command window or shell interpolation."""
 
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return popen(
+    return (popen or subprocess.Popen)(
         [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(launcher_path)],
         cwd=launcher_path.parent,
         stdin=subprocess.DEVNULL,
@@ -194,12 +198,20 @@ def wait_for_webui(
     *,
     timeout_seconds: float = 45.0,
     interval_seconds: float = 0.5,
+    cancel_event=None,
 ) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if webui_is_ready(url):
             return True
-        time.sleep(interval_seconds)
+        if cancel_event is None:
+            time.sleep(interval_seconds)
+        elif cancel_event.wait(interval_seconds):
+            return False
+    if cancel_event is not None and cancel_event.is_set():
+        return False
     return webui_is_ready(url)
 
 

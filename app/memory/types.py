@@ -23,7 +23,13 @@ PROFILE_FIELDS = frozenset(
     }
 )
 ACCOUNT_PROFILE_FIELDS = frozenset(
-    {"public_name", "background", "public_information", "private_information"}
+    {
+        "public_name",
+        "background",
+        "public_information",
+        "public_image_path",
+        "private_information",
+    }
 )
 
 
@@ -114,6 +120,7 @@ class AccountProfile:
     public_name: str | None = None
     background: str | None = None
     public_information: str | None = None
+    public_image_path: str | None = None
     private_information: str | None = None
     provenance: dict[str, Any] = field(default_factory=dict)
     created_at: str | None = None

@@ -362,11 +362,17 @@ class MemoryRepository:
         assert profile is not None
         return profile
 
-    def get_account_profile(self) -> AccountProfile | None:
+    def get_account_profile(self, account_key: str | None = None) -> AccountProfile | None:
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM current_account_profile WHERE id = 1"
-            ).fetchone()
+            if account_key is None:
+                row = connection.execute(
+                    "SELECT * FROM current_account_profile WHERE id = 1"
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM account_profiles WHERE account_key = ?",
+                    (account_key,),
+                ).fetchone()
         return self._account_profile(row) if row is not None else None
 
     def set_account_profile_field(
@@ -374,10 +380,11 @@ class MemoryRepository:
         field_name: str,
         value: str | None,
         provenance: dict[str, Any],
+        account_key: str | None = None,
     ) -> AccountProfile:
         if field_name not in ACCOUNT_PROFILE_FIELDS:
             raise ValueError(f"unsupported account profile field: {field_name}")
-        profile = self.get_account_profile()
+        profile = self.get_account_profile(account_key)
         values = {
             name: getattr(profile, name) if profile else None
             for name in ACCOUNT_PROFILE_FIELDS
@@ -386,13 +393,33 @@ class MemoryRepository:
         values[field_name] = value.strip() if value else None
         sources[field_name] = provenance
         with self.database.connect() as connection:
+            if account_key is not None:
+                connection.execute(
+                    "INSERT INTO account_profiles (account_key, public_name, background, "
+                    "public_information, public_image_path, private_information, provenance_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_key) DO UPDATE SET "
+                    "public_name=excluded.public_name, background=excluded.background, "
+                    "public_information=excluded.public_information, "
+                    "public_image_path=excluded.public_image_path, "
+                    "private_information=excluded.private_information, "
+                    "provenance_json=excluded.provenance_json, updated_at=CURRENT_TIMESTAMP",
+                    (account_key, values["public_name"], values["background"],
+                     values["public_information"], values["public_image_path"],
+                     values["private_information"], json.dumps(sources, ensure_ascii=False)),
+                )
+                row = connection.execute(
+                    "SELECT * FROM account_profiles WHERE account_key = ?", (account_key,)
+                ).fetchone()
+                return self._account_profile(row)
             connection.execute(
                 "INSERT INTO current_account_profile "
                 "(id, public_name, background, public_information, "
-                "private_information, provenance_json) VALUES (1, ?, ?, ?, ?, ?) "
+                "public_image_path, private_information, provenance_json) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET public_name = excluded.public_name, "
                 "background = excluded.background, "
                 "public_information = excluded.public_information, "
+                "public_image_path = excluded.public_image_path, "
                 "private_information = excluded.private_information, "
                 "provenance_json = excluded.provenance_json, "
                 "updated_at = CURRENT_TIMESTAMP",
@@ -400,6 +427,7 @@ class MemoryRepository:
                     values["public_name"],
                     values["background"],
                     values["public_information"],
+                    values["public_image_path"],
                     values["private_information"],
                     json.dumps(sources, ensure_ascii=False),
                 ),
@@ -523,6 +551,7 @@ class MemoryRepository:
             public_name=row["public_name"],
             background=row["background"],
             public_information=row["public_information"],
+            public_image_path=row["public_image_path"],
             private_information=row["private_information"],
             provenance=json.loads(str(row["provenance_json"])),
             created_at=str(row["created_at"]),

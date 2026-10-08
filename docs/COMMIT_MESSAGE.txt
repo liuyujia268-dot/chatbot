@@ -1,0 +1,14 @@
+release: 归档 Chatbot 0.1.0，整理文档并提供 Windows 便携版
+
+- 汇总 NapCat QQ 桌面聊天、OpenAI-compatible 文本/视觉模型和 SQLite 记忆能力
+- 保留账号隔离、Dry Run、人工接管、发送状态与离线回归测试边界
+- 精简 README，补充源码与便携版上手步骤，完整说明迁入 docs/USER_GUIDE.md
+- 提供 Windows x64 Chatbot.exe 完整包、更新包、文件哈希和离线自检
+- 将发行产物放入 release，使用无密钥默认配置，不打包聊天或 QQ 登录数据
+- 保留 NapCat 来源与许可证，并向上游开发者和贡献者致谢
+
+验证：
+.venv\Scripts\python.exe -m pytest -q
+build-portable.cmd
+
+范围：不新增平台或外部依赖，不改现用 .env、数据库和 Prompt，不发送真实 QQ 消息。

@@ -9,6 +9,7 @@ from app.adapters.console import (
     parse_contact_message,
     parse_takeover_command,
 )
+from app.core.dispatcher import DispatchResult
 from app.core.platform import OutboundMessage
 
 
@@ -49,6 +50,7 @@ def test_qq_console_sends_operator_text_directly_to_primary_contact() -> None:
             dispatcher=None,  # type: ignore[arg-type]
             merger=None,  # type: ignore[arg-type]
             qq_mode=True,
+            qq_account_provider=lambda: '10001',
             qq_sender=sender,
             qq_dry_run=False,
             qq_primary_contact_id="20002",
@@ -72,6 +74,7 @@ def test_qq_console_supports_numeric_private_and_prefixed_group_targets() -> Non
             dispatcher=None,  # type: ignore[arg-type]
             merger=None,  # type: ignore[arg-type]
             qq_mode=True,
+            qq_account_provider=lambda: '10001',
             qq_sender=sender,
         )
 
@@ -81,6 +84,56 @@ def test_qq_console_supports_numeric_private_and_prefixed_group_targets() -> Non
         assert [item.conversation_id for item in sender.calls] == [
             "qq:private:30003",
             "qq:group:80001",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_console_model_reply_is_printed_as_separate_sentence_bubbles() -> None:
+    async def scenario() -> None:
+        sender = RecordingSender()
+        console = ConsoleAdapter(
+            dispatcher=None,  # type: ignore[arg-type]
+            merger=None,  # type: ignore[arg-type]
+            sender=sender,
+        )
+
+        await console._send_result(
+            DispatchResult(
+                session_id="张三",
+                merged_content="你好",
+                message_count=1,
+                conversation_version=1,
+                reply="知道了。等我一下！\n马上来",
+            )
+        )
+
+        assert [message.text for message in sender.calls] == [
+            "知道了。",
+            "等我一下！",
+            "马上来",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_console_manual_qq_text_is_not_split() -> None:
+    async def scenario() -> None:
+        sender = RecordingSender()
+        console = ConsoleAdapter(
+            dispatcher=None,  # type: ignore[arg-type]
+            merger=None,  # type: ignore[arg-type]
+            qq_mode=True,
+            qq_account_provider=lambda: '10001',
+            qq_sender=sender,
+            qq_primary_contact_id="20002",
+            qq_primary_contact_name="宇飞",
+        )
+
+        await console.send_qq_message("宇飞", "人工第一句。人工第二句。")
+
+        assert [message.text for message in sender.calls] == [
+            "人工第一句。人工第二句。"
         ]
 
     asyncio.run(scenario())
